@@ -8,17 +8,35 @@ import (
 )
 
 // newReachableTown builds a town root with routes.jsonl describing one rig.
+// mayor/town.json is what beads.FindTownRoot keys on, so the check resolves the
+// town database through the same path the runtime uses.
 func newReachableTown(t *testing.T, routes string) string {
 	t.Helper()
 	townRoot := t.TempDir()
 	townBeads := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(townBeads, 0o755); err != nil {
-		t.Fatalf("mkdir town beads: %v", err)
+	mayorDir := filepath.Join(townRoot, "mayor")
+	for _, dir := range []string{townBeads, mayorDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routes), 0o644); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
 	return townRoot
+}
+
+// mkdirs creates every directory or fails the test.
+func mkdirs(t *testing.T, dirs ...string) {
+	t.Helper()
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
 }
 
 func TestAgentBeadReachableCheck_Metadata(t *testing.T) {

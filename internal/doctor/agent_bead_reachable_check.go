@@ -91,22 +91,61 @@ func (c *AgentBeadReachableCheck) Run(ctx *CheckContext) *CheckResult {
 		return ids
 	}
 
-	var unreachable []string
-	checked := 0
+	// Resolve every agent's databases up front so the "does this bead exist at
+	// all" test can consult the full set, not just the current agent's.
+	type resolvedAgent struct {
+		loc     agentBeadLocation
+		cwdDir  string   // where the agent's own cwd lands
+		reaches []string // databases an agent-bead read from that cwd consults
+	}
+	var agents []resolvedAgent
+	allDirs := map[string]bool{townBeadsDir: true}
 	for _, loc := range locations {
-		resolved := resolveBeadsDirFrom(loc.agentDir)
-		if resolved == "" {
+		cwdDir := resolveBeadsDirFrom(loc.agentDir)
+		if cwdDir == "" {
 			continue // Agent dir is outside any beads workspace — nothing to assert.
 		}
-		checked++
-		if beadIDsIn(resolved)[loc.id] || beadIDsIn(townBeadsDir)[loc.id] {
+		reaches := agentBeadDirsFrom(loc.agentDir, cwdDir)
+		agents = append(agents, resolvedAgent{loc: loc, cwdDir: cwdDir, reaches: reaches})
+		for _, dir := range reaches {
+			allDirs[dir] = true
+		}
+	}
+
+	// existsSomewhere reports whether any known database holds the bead. A bead
+	// that exists nowhere is missing, not misrouted: agent-beads-exist owns that
+	// diagnosis, and reporting it here too would double-count every missing bead.
+	existsSomewhere := func(id string) bool {
+		for dir := range allDirs {
+			if beadIDsIn(dir)[id] {
+				return true
+			}
+		}
+		return false
+	}
+
+	var unreachable []string
+	checked := 0
+	for _, a := range agents {
+		if !existsSomewhere(a.loc.id) {
 			continue
 		}
-		rel, relErr := filepath.Rel(ctx.TownRoot, loc.agentDir)
-		if relErr != nil {
-			rel = loc.agentDir
+		checked++
+		reachable := false
+		for _, dir := range a.reaches {
+			if beadIDsIn(dir)[a.loc.id] {
+				reachable = true
+				break
+			}
 		}
-		unreachable = append(unreachable, fmt.Sprintf("%s: %s resolves to %s", loc.id, rel, resolved))
+		if reachable {
+			continue
+		}
+		rel, relErr := filepath.Rel(ctx.TownRoot, a.loc.agentDir)
+		if relErr != nil {
+			rel = a.loc.agentDir
+		}
+		unreachable = append(unreachable, fmt.Sprintf("%s: %s resolves to %s", a.loc.id, rel, a.cwdDir))
 	}
 
 	if len(unreachable) == 0 {
@@ -123,7 +162,7 @@ func (c *AgentBeadReachableCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("%d agent bead(s) unreachable from the owning agent's directory", len(unreachable)),
 		Details: unreachable,
-		FixHint: "Run 'gt doctor --fix' to create missing agent beads, then re-check routing (agent beads live in the town database)",
+		FixHint: "Agent beads live in the town database; check the rig's .beads redirect and routes.jsonl for a database that shadows it",
 	}
 }
 
@@ -190,6 +229,25 @@ func resolveBeadsDirFrom(startDir string) string {
 		}
 		dir = parent
 	}
+}
+
+// agentBeadDirsFrom returns the databases an agent-bead read issued from
+// agentDir actually consults, in order: the database the agent's cwd resolves
+// to, then the database beads.ForAgentBead re-roots to (the town database that
+// holds agent beads). Deriving the second from ForAgentBead rather than
+// recomputing "the town .beads" keeps this check honest — if the runtime's
+// town-root discovery regresses, the check regresses with it and reports the
+// agent beads as unreachable instead of silently agreeing with itself.
+func agentBeadDirsFrom(agentDir, cwdDir string) []string {
+	dirs := []string{cwdDir}
+	agentBeadDir := beads.New(agentDir).ForAgentBead().ResolvedBeadsDir()
+	if agentBeadDir == "" || filepath.Clean(agentBeadDir) == filepath.Clean(cwdDir) {
+		return dirs
+	}
+	if _, err := os.Stat(agentBeadDir); err != nil {
+		return dirs // Not a real database — querying it would just fail slowly.
+	}
+	return append(dirs, agentBeadDir)
 }
 
 // listBeadIDs returns the set of agent bead IDs readable from beadsDir,
