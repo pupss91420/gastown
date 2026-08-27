@@ -27,6 +27,10 @@ import (
 // witness log nobody reads.
 type AgentBeadReachableCheck struct {
 	BaseCheck
+
+	// beadIDs lists the bead IDs readable from a beads directory. Overridden
+	// in tests so reachability can be exercised without a live bd/Dolt.
+	beadIDs func(beadsDir string) map[string]bool
 }
 
 // NewAgentBeadReachableCheck creates a new agent bead reachability check.
@@ -70,6 +74,10 @@ func (c *AgentBeadReachableCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Cache bead IDs per database — several agents share one resolved database.
+	list := c.beadIDs
+	if list == nil {
+		list = listBeadIDs
+	}
 	idsByDir := make(map[string]map[string]bool)
 	beadIDsIn := func(beadsDir string) map[string]bool {
 		if beadsDir == "" {
@@ -78,7 +86,7 @@ func (c *AgentBeadReachableCheck) Run(ctx *CheckContext) *CheckResult {
 		if ids, ok := idsByDir[beadsDir]; ok {
 			return ids
 		}
-		ids := listBeadIDs(beadsDir)
+		ids := list(beadsDir)
 		idsByDir[beadsDir] = ids
 		return ids
 	}
