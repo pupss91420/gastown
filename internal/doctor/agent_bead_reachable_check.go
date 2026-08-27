@@ -25,6 +25,10 @@ import (
 // database its cwd resolves to, plus town". This check asserts that invariant
 // per agent so a future routing regression is caught here instead of in a
 // witness log nobody reads.
+//
+// It reports only beads that exist in some database the town knows about but
+// not in one the owning agent reaches — a bead that exists nowhere is missing,
+// which agent-beads-exist already reports.
 type AgentBeadReachableCheck struct {
 	BaseCheck
 
@@ -99,15 +103,29 @@ func (c *AgentBeadReachableCheck) Run(ctx *CheckContext) *CheckResult {
 		reaches []string // databases an agent-bead read from that cwd consults
 	}
 	var agents []resolvedAgent
-	allDirs := map[string]bool{townBeadsDir: true}
 	for _, loc := range locations {
 		cwdDir := resolveBeadsDirFrom(loc.agentDir)
 		if cwdDir == "" {
 			continue // Agent dir is outside any beads workspace — nothing to assert.
 		}
-		reaches := agentBeadDirsFrom(loc.agentDir, cwdDir)
-		agents = append(agents, resolvedAgent{loc: loc, cwdDir: cwdDir, reaches: reaches})
-		for _, dir := range reaches {
+		agents = append(agents, resolvedAgent{
+			loc:     loc,
+			cwdDir:  cwdDir,
+			reaches: agentBeadDirsFrom(loc.agentDir, cwdDir),
+		})
+	}
+
+	// Every database the town knows about, so "does this bead exist at all" is
+	// answered town-wide. This deliberately ignores ctx.RigName: a --rig run
+	// narrows which agents are *reported*, not where their beads might be
+	// hiding — an alphaprime2 bead misrouted into the gastown database is
+	// exactly the finding this check is here to make.
+	allDirs := map[string]bool{townBeadsDir: true}
+	for _, dir := range knownRigBeadsDirs(ctx.TownRoot, routes) {
+		allDirs[dir] = true
+	}
+	for _, a := range agents {
+		for _, dir := range a.reaches {
 			allDirs[dir] = true
 		}
 	}
@@ -229,6 +247,33 @@ func resolveBeadsDirFrom(startDir string) string {
 		}
 		dir = parent
 	}
+}
+
+// knownRigBeadsDirs returns the beads directory of every rig the town routes
+// to, whether or not that rig has agent directories on disk.
+func knownRigBeadsDirs(townRoot string, routes []beads.Route) []string {
+	seen := make(map[string]bool)
+	var dirs []string
+	for _, r := range routes {
+		parts := strings.Split(r.Path, "/")
+		if len(parts) == 0 || parts[0] == "." || parts[0] == "" {
+			continue
+		}
+		rigDir := filepath.Join(townRoot, parts[0])
+		if _, err := os.Stat(rigDir); err != nil {
+			continue
+		}
+		dir := beads.ResolveBeadsDir(rigDir)
+		if dir == "" || seen[dir] {
+			continue
+		}
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	return dirs
 }
 
 // agentBeadDirsFrom returns the databases an agent-bead read issued from

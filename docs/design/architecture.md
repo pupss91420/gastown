@@ -62,10 +62,13 @@ never reached abbreviated patrol effort and burned full-effort tokens every
 cycle.
 
 gt resolves agent beads against **the database the cwd resolves to, then the
-town database** (`resolveAgentBeadDir` in `internal/cmd/agent_tracking_beads.go`,
-and `Beads.ForAgentBead` in `internal/beads/beads.go`). Rigs that still hold a
-rig-local agent bead keep using it; everyone else falls back to town. `gt doctor`
-asserts the invariant per agent via the `agent-bead-reachable` check.
+town database** — `resolveAgentBeadDir` in `internal/cmd/agent_tracking_beads.go`
+tries the cwd-local database first and falls back to town, while
+`Beads.ForAgentBead` in `internal/beads/beads.go` re-roots straight at town and
+disables prefix routing. Rigs that still hold a rig-local agent bead keep using
+it; everyone else lands on town. `gt doctor` asserts the invariant per agent via
+the `agent-bead-reachable` check, which flags any agent bead that lives in a
+database its owning agent never consults.
 
 Raw `bd` has no such fallback. To read an agent bead by hand from a rig
 directory, point it at the town database:
