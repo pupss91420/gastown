@@ -18,6 +18,7 @@ type polecatInventoryItem struct {
 	Name           string
 	State          polecat.State
 	Issue          string
+	IssueStatus    string
 	CleanupStatus  string
 	ActiveMR       string
 	Branch         string
@@ -32,6 +33,11 @@ type polecatActiveWorkEvidence struct {
 	CountsTowardCapacity bool
 	Blocker              string
 	AssignedIssue        string
+	// AssignedStatus is the assigned bead's own status. It separates two states
+	// that both look like "no session" from the outside: status=hooked means the
+	// agent never came up to claim the work, status=in_progress means it did and
+	// the session died later (hq-a0f).
+	AssignedStatus string
 }
 
 func newPolecatSessionSet(sessionNames []string) polecatSessionSet {
@@ -73,6 +79,19 @@ func polecatSessionKey(rigName, polecatName string) string {
 	return rigName + polecatSessionKeySep + polecatName
 }
 
+// deadSessionWorkState classifies work that has no live session.
+//
+// status=hooked means the dispatch never handed off: the bead was hooked and no
+// agent ever claimed it, because StartSession sets the work to in_progress the
+// moment a session comes up. That is a failed spawn, not a crash mid-work, and
+// hq-a0f asks for the two to be distinguishable without reading tmux.
+func deadSessionWorkState(issueStatus string) polecat.State {
+	if issueStatus == string(beads.IssueStatusHooked) {
+		return polecat.StateHookedNoSession
+	}
+	return polecat.StateStalled
+}
+
 func buildPolecatInventoryItem(rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) polecatInventoryItem {
 	return buildPolecatInventoryItemFromEvidence(rigName, polecatName, fields, assessPolecatAssignedIssueWork(activeWork), sessions)
 }
@@ -109,11 +128,12 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	if activeWorkEvidence.BlocksCleanup {
 		item.Issue = activeWorkEvidence.AssignedIssue
+		item.IssueStatus = activeWorkEvidence.AssignedStatus
 		if activeWorkEvidence.RequiresRestart || activeWorkEvidence.CountsTowardCapacity {
 			if running {
 				item.State = polecat.StateWorking
 			} else {
-				item.State = polecat.StateStalled
+				item.State = deadSessionWorkState(item.IssueStatus)
 			}
 		} else if running && !polecat.CleanupStatus(item.CleanupStatus).IsSafe() {
 			item.State = polecat.StateReviewNeeded
@@ -209,6 +229,7 @@ func assessPolecatAssignedIssueWork(issue *beads.Issue) polecatActiveWorkEvidenc
 		CountsTowardCapacity: requiresRestart,
 		Blocker:              fmt.Sprintf("assigned_work=%s status=%s", issue.ID, issue.Status),
 		AssignedIssue:        issue.ID,
+		AssignedStatus:       issue.Status,
 	}
 }
 

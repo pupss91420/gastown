@@ -62,6 +62,21 @@ const (
 	// Unlike "stuck" (polecat self-reports), stalled is detected externally.
 	StateStalled State = "stalled"
 
+	// StateHookedNoSession means work is hooked to the polecat but no session was
+	// ever started for it. Distinct from StateStalled: stalled work reached
+	// status=in_progress, so a session existed and later died; hooked-no-session
+	// work is still at status=hooked, meaning the agent never came up to claim it.
+	// A dispatcher that reported success while leaving a polecat in this state
+	// stranded the work (hq-a0f).
+	//
+	// This state is derived for reporting in gt polecat list so an operator can
+	// tell "died mid-work" from "never started" without reading tmux.
+	// Manager.loadFromBeads deliberately does not emit it: lifecycle policy treats
+	// it exactly like StateStalled (NEEDS_RECOVERY, counts toward capacity, never
+	// safe to nuke), and IsStalled reports true for it so boolean callers are
+	// unaffected.
+	StateHookedNoSession State = "hooked-no-session"
+
 	// StateZombie means a tmux session exists but has no corresponding worktree directory.
 	// This is a detected condition: the polecat was incompletely nuked or has a
 	// session naming mismatch, leaving an orphaned tmux session.
@@ -73,9 +88,11 @@ func (s State) IsWorking() bool {
 	return s == StateWorking
 }
 
-// IsStalled returns true if the polecat's session has died while work was assigned.
+// IsStalled returns true if work is assigned to the polecat but no live session
+// is serving it — whether the session died mid-work (StateStalled) or never
+// started at all (StateHookedNoSession).
 func (s State) IsStalled() bool {
-	return s == StateStalled
+	return s == StateStalled || s == StateHookedNoSession
 }
 
 // IsIdle returns true if the polecat has completed work and is available for reuse.

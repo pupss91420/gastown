@@ -196,3 +196,60 @@ func TestPolecatNameFromAssignee(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildPolecatInventoryItemSeparatesNeverStartedFromDiedMidWork covers
+// hq-a0f acceptance criterion 3 at the inventory layer that feeds
+// `gt polecat list`: with no tmux session, a bead still at status=hooked means
+// the dispatch never produced an agent, while in_progress means one existed and
+// died. Both used to render as "stalled".
+func TestBuildPolecatInventoryItemSeparatesNeverStartedFromDiedMidWork(t *testing.T) {
+	setupPolecatTestRegistry(t)
+	tests := []struct {
+		name        string
+		issueStatus beads.IssueStatus
+		sessions    polecatSessionSet
+		wantState   polecat.State
+	}{
+		{
+			name:        "hooked bead with no session never started",
+			issueStatus: beads.IssueStatusHooked,
+			sessions:    polecatSessionSet{},
+			wantState:   polecat.StateHookedNoSession,
+		},
+		{
+			name:        "in_progress bead with no session died mid-work",
+			issueStatus: beads.StatusInProgress,
+			sessions:    polecatSessionSet{},
+			wantState:   polecat.StateStalled,
+		},
+		{
+			name:        "hooked bead with a live session is working",
+			issueStatus: beads.IssueStatusHooked,
+			sessions:    newPolecatSessionSet([]string{"gt-toast"}),
+			wantState:   polecat.StateWorking,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := buildPolecatInventoryItem(
+				"gastown",
+				"toast",
+				&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean)},
+				&beads.Issue{ID: "hq-a0f", Status: string(tt.issueStatus), Assignee: "gastown/polecats/toast"},
+				tt.sessions,
+			)
+			if item.State != tt.wantState {
+				t.Fatalf("state = %q, want %q (item=%+v)", item.State, tt.wantState, item)
+			}
+			if item.IssueStatus != string(tt.issueStatus) {
+				t.Errorf("IssueStatus = %q, want %q", item.IssueStatus, tt.issueStatus)
+			}
+			// Whichever way it is classified, the polecat must never be
+			// nukeable while it still holds work.
+			if item.Disposition.SafeToNuke {
+				t.Errorf("SafeToNuke = true for a polecat holding %s work", tt.issueStatus)
+			}
+		})
+	}
+}

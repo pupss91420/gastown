@@ -134,6 +134,52 @@ func TestEffectivePolecatState(t *testing.T) {
 			},
 			want: polecat.StateReviewNeeded,
 		},
+		{
+			// hq-a0f: a bead still at status=hooked with no session was never
+			// claimed by an agent — the dispatch silently produced no session.
+			// It must not render the same as a session that died mid-work.
+			name: "session-dead-with-hooked-bead-is-hooked-no-session",
+			item: PolecatListItem{
+				State:          polecat.StateWorking,
+				Issue:          "hq-a0f",
+				IssueStatus:    "hooked",
+				SessionRunning: false,
+			},
+			want: polecat.StateHookedNoSession,
+		},
+		{
+			name: "session-dead-with-in-progress-bead-stays-stalled",
+			item: PolecatListItem{
+				State:          polecat.StateWorking,
+				Issue:          "hq-a0f",
+				IssueStatus:    "in_progress",
+				SessionRunning: false,
+			},
+			want: polecat.StateStalled,
+		},
+		{
+			name: "hooked-no-session-is-not-rewritten-when-session-dead",
+			item: PolecatListItem{
+				State:          polecat.StateHookedNoSession,
+				Issue:          "hq-a0f",
+				IssueStatus:    "hooked",
+				SessionRunning: false,
+			},
+			want: polecat.StateHookedNoSession,
+		},
+		{
+			// Matches the stalled precedent above: a detected failure state is
+			// not silently rewritten just because a session is present now.
+			name: "hooked-no-session-is-not-rewritten-when-session-alive",
+			item: PolecatListItem{
+				State:                polecat.StateHookedNoSession,
+				Issue:                "hq-a0f",
+				IssueStatus:          "hooked",
+				SessionRunning:       true,
+				CountsTowardCapacity: true,
+			},
+			want: polecat.StateHookedNoSession,
+		},
 	}
 
 	for _, tt := range tests {

@@ -503,6 +503,29 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 		style.PrintWarning("runtime may not be fully ready: %v", err)
 	}
 
+	// Prove the session is actually live before claiming the spawn succeeded (hq-a0f).
+	//
+	// Every check up to this point is one-shot and early: tmux probes pane_dead
+	// twice within 250ms of creating the session, and SessionManager.Start's
+	// HasSession/CheckSessionHealth pair runs before the readiness wait above.
+	// A runtime that starts and then exits passes all of them, and the
+	// WaitForRuntimeReady failure right above is warn-only — so StartSession used
+	// to return a pane for a session with no agent in it. The dispatcher then
+	// printed success over work hooked to an agent that does not exist.
+	//
+	// Run this BEFORE the agent-state writes below so a dead session is never
+	// recorded as "working".
+	if err := verifySessionLive(t, s.SessionName, spawnLivenessTimeout, spawnLivenessInterval); err != nil {
+		if errors.Is(err, errSessionUnverifiable) {
+			// tmux never answered. Nothing was observed, so this is not evidence
+			// the agent is dead — warn with the bounds stated and continue.
+			style.PrintWarning("could not verify session liveness for %s (continuing): %v", s.SessionName, err)
+		} else {
+			_ = t.KillSessionWithProcesses(s.SessionName)
+			return "", fmt.Errorf("verifying session for %s/%s: %w", s.RigName, s.PolecatName, err)
+		}
+	}
+
 	// Update agent state with retry logic (gt-94llt7: fail-safe Dolt writes).
 	// Note: warn-only, not fail-hard. The tmux session is already started above,
 	// so returning an error here would leave an orphaned session with no cleanup path.

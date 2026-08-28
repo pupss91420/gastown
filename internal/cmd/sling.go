@@ -1053,7 +1053,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Name the actual assignee: success output that omitted it is what made the
 	// silent misroute in hq-s1t invisible.
-	fmt.Printf("%s Work attached to hook: %s (status=hooked)\n", style.Bold.Render("✓"), targetAgent)
+	//
+	// Qualify it further when a session still has to come up (hq-a0f). The hook
+	// is genuinely written here, but for a freshly spawned polecat the dispatch
+	// is not done until StartSession proves the agent is live below — and an
+	// unqualified "✓" here was being read as the whole outcome.
+	if newPolecatInfo != nil {
+		fmt.Printf("%s Work attached to hook: %s (status=hooked) — session not started yet\n", style.Bold.Render("✓"), targetAgent)
+	} else {
+		fmt.Printf("%s Work attached to hook: %s (status=hooked)\n", style.Bold.Render("✓"), targetAgent)
+	}
 
 	// Log sling event to activity feed
 	_ = events.LogFeed(events.TypeSling, actor, events.SlingPayload(beadID, targetAgent))
@@ -1105,10 +1114,12 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		if err != nil {
 			// Rollback: session failed, clean up zombie artifacts (worktree, hooked bead).
 			// Without rollback, next sling attempt fails with "bead already hooked" (gt-jn40ft).
+			reportDispatchFailure(targetAgent, beadID, err)
 			rollbackSpawnedPolecat("Session failed")
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
+		fmt.Printf("%s Session verified live for %s\n", style.Bold.Render("▶"), newPolecatInfo.PolecatName)
 	}
 
 	// Try to inject the "start now" prompt (graceful if no tmux)
@@ -1412,14 +1423,34 @@ func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, 
 			}
 
 			// 2. Unhook the bead (set status back to open so it can be re-slung).
+			//
+			// Verified, not best-effort (hq-a0f): the whole failure this rollback
+			// exists to prevent is work left hooked to an agent with no session, so
+			// a rollback that trusts the write's exit code and moves on can leave
+			// exactly that state behind while printing a dim warning nobody reads.
+			// Re-read the bead and retry until it is confirmed released; if it never
+			// is, say so loudly.
 			unhookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
-			if err := BdCmd("update", beadID, "--status=open", "--assignee=").
-				Dir(unhookDir).
-				WithAutoCommit().
-				Run(); err != nil {
-				fmt.Printf("  %s Could not unhook bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+			unhook := func(id string) error {
+				return BdCmd("update", id, "--status=open", "--assignee=").
+					Dir(unhookDir).
+					WithAutoCommit().
+					Run()
+			}
+			readStatus := func(id string) (string, error) {
+				current, err := getBeadInfoForRollback(id)
+				if err != nil {
+					return "", err
+				}
+				if current == nil {
+					return "", fmt.Errorf("no bead info returned for %s", id)
+				}
+				return current.Status, nil
+			}
+			if err := ensureBeadUnhooked(beadID, unhook, readStatus, unhookVerifyAttempts); err != nil {
+				reportStrandedBead(beadID, err)
 			} else {
-				fmt.Printf("  %s Unhooked bead %s\n", style.Dim.Render("○"), beadID)
+				fmt.Printf("  %s Unhooked bead %s (verified)\n", style.Dim.Render("○"), beadID)
 			}
 		}
 	}
