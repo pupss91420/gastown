@@ -395,7 +395,9 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		return result, fmt.Errorf("failed to hook bead: %w", err)
 	}
 
-	fmt.Printf("  %s Work attached to %s\n", style.Bold.Render("✓"), spawnInfo.PolecatName)
+	// Qualified: the hook is written, but the dispatch is not complete until the
+	// session below proves live (hq-a0f).
+	fmt.Printf("  %s Work attached to %s — session not started yet\n", style.Bold.Render("✓"), spawnInfo.PolecatName)
 
 	// 8. Log sling event
 	_ = events.LogFeed(events.TypeSling, actor, events.SlingPayload(beadToHook, targetAgent))
@@ -417,12 +419,12 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	// 11. Start polecat session
 	pane, err := spawnInfo.StartSession()
 	if err != nil {
-		fmt.Printf("  %s Could not start session: %v, cleaning up partial state...\n", style.Dim.Render("✗"), err)
+		reportDispatchFailure(targetAgent, beadToHook, err)
 		rollbackSpawnedPolecat(beadToHook, "Session failed")
 		result.ErrMsg = fmt.Sprintf("session failed: %v", err)
 		return result, fmt.Errorf("starting polecat session: %w", err)
 	}
-	fmt.Printf("  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
+	fmt.Printf("  %s Session verified live for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
 	_ = pane
 
 	result.Success = true

@@ -505,7 +505,13 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	if err := hookBeadWithRetryFn(wispRootID, targetAgent, hookDir); err != nil {
 		return err
 	}
-	fmt.Printf("%s Attached to hook (status=hooked)\n", style.Bold.Render("✓"))
+	if resolved.NewPolecatInfo != nil {
+		// Qualified: the dispatch is not complete until the session below proves
+		// live (hq-a0f).
+		fmt.Printf("%s Attached to hook (status=hooked) — session not started yet\n", style.Bold.Render("✓"))
+	} else {
+		fmt.Printf("%s Attached to hook (status=hooked)\n", style.Bold.Render("✓"))
+	}
 
 	// Log sling event to activity feed (formula slinging)
 	actor := detectActor()
@@ -556,10 +562,12 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		pane, err := resolved.NewPolecatInfo.StartSession()
 		if err != nil {
 			// Rollback: unhook wisp, delete Dolt branch, clean up polecat worktree/agent bead
+			reportDispatchFailure(targetAgent, wispRootID, err)
 			rollbackSlingArtifactsFn(resolved.NewPolecatInfo, wispRootID, "", "")
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
+		fmt.Printf("%s Session verified live for %s\n", style.Bold.Render("▶"), resolved.NewPolecatInfo.PolecatName)
 	}
 
 	// Step 4: Nudge to start (graceful if no tmux)

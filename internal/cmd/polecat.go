@@ -397,6 +397,7 @@ type PolecatListItem struct {
 	NeedsRecovery        bool          `json:"needs_recovery"`
 	NeedsMQSubmit        bool          `json:"needs_mq_submit"`
 	MQStatus             string        `json:"mq_status,omitempty"`
+	IssueStatus          string        `json:"issue_status,omitempty"`
 	CountsTowardCapacity bool          `json:"counts_toward_capacity"`
 	ReuseStatus          string        `json:"reuse_status,omitempty"`
 	Blockers             []string      `json:"blockers,omitempty"`
@@ -416,11 +417,12 @@ func effectivePolecatState(item PolecatListItem) polecat.State {
 	if item.SessionRunning && item.Issue != "" && item.CountsTowardCapacity && (state == polecat.StateDone || state == polecat.StateIdle) {
 		return polecat.StateWorking
 	}
-	// When session is dead but beads still says "working", mark as stalled
-	// (not done — work was interrupted, not completed). The manager's loadFromBeads
-	// now returns StateStalled for this case, but list reconciliation may override.
+	// When session is dead but beads still says "working", the work is not being
+	// served. Split the two ways that happens (hq-a0f): a bead still at
+	// status=hooked was never claimed by an agent (the spawn silently produced no
+	// session), while in_progress means a session existed and died mid-work.
 	if !item.SessionRunning && !item.Zombie && state == polecat.StateWorking {
-		return polecat.StateStalled
+		return deadSessionWorkState(item.IssueStatus)
 	}
 	return state
 }
@@ -522,6 +524,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			state := effectivePolecatState(PolecatListItem{
 				State:                item.State,
 				Issue:                item.Issue,
+				IssueStatus:          item.IssueStatus,
 				SessionRunning:       item.SessionRunning,
 				CountsTowardCapacity: disposition.CountsTowardCapacity,
 			})
@@ -530,6 +533,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 				Name:                 name,
 				State:                state,
 				Issue:                item.Issue,
+				IssueStatus:          item.IssueStatus,
 				CleanupStatus:        item.CleanupStatus,
 				ActiveMR:             item.ActiveMR,
 				Branch:               item.Branch,
@@ -598,7 +602,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			stateStr = style.Info.Render(stateStr)
 		case polecat.StateStuck:
 			stateStr = style.Warning.Render(stateStr)
-		case polecat.StateStalled:
+		case polecat.StateStalled, polecat.StateHookedNoSession:
 			stateStr = style.Error.Render(stateStr)
 		case polecat.StateReviewNeeded:
 			stateStr = style.Warning.Render(stateStr)
@@ -613,6 +617,10 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s %s/%s  %s\n", sessionStatus, p.Rig, p.Name, stateStr)
 		if p.Issue != "" {
 			fmt.Printf("    %s\n", style.Dim.Render(p.Issue))
+		}
+		if p.State == polecat.StateHookedNoSession {
+			fmt.Printf("    %s\n", style.Error.Render(
+				"work hooked but no session was ever started — dispatch never landed; recover with: gt session restart "+p.Rig+"/"+p.Name))
 		}
 		if p.ReuseStatus != "" {
 			details := "reuse: " + p.ReuseStatus
@@ -801,7 +809,7 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 		stateStr = style.Info.Render(stateStr)
 	case polecat.StateStuck:
 		stateStr = style.Warning.Render(stateStr)
-	case polecat.StateStalled:
+	case polecat.StateStalled, polecat.StateHookedNoSession:
 		stateStr = style.Error.Render(stateStr)
 	case polecat.StateReviewNeeded:
 		stateStr = style.Warning.Render(stateStr)
