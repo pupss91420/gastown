@@ -883,6 +883,10 @@ type GitState struct {
 	UnpreservedPatchCount int      `json:"unpreserved_patch_count"`
 	StashCount            int      `json:"stash_count"`                  // Current-branch stashes: per-polecat risk.
 	SharedStashCount      int      `json:"shared_stash_count,omitempty"` // Other branch stashes visible through the shared repo.
+	// PreservationMeasured records whether the durability comparison actually
+	// ran. Without it a failed comparison is indistinguishable from a branch
+	// with nothing unpreserved, and "never checked" reads as "checked, clean".
+	PreservationMeasured bool `json:"preservation_measured"`
 }
 
 func runPolecatGitState(cmd *cobra.Command, args []string) error {
@@ -988,7 +992,9 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 	}
 
 	branch, _ := worktreeGit.CurrentBranch()
-	if preservation, preserveErr := worktreeGit.BranchPreservationStatus(branch, "origin", targets); preserveErr == nil {
+	preservation, preserveErr := worktreeGit.BranchPreservationStatus(branch, "origin", targets)
+	if preserveErr == nil {
+		state.PreservationMeasured = true
 		state.ComparisonBase = preservation.ComparisonBase
 		state.UnpreservedPatchCount = preservation.UnpreservedPatchCount
 		if preservation.UnpreservedPatchCount > 0 {
@@ -1101,7 +1107,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		status.ActiveMR = fields.ActiveMR
 		input.ActiveMR = fields.ActiveMR
 		hookBead := agentHookBead(agentIssue, fields)
-		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
+		_, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		targetRefs, targetRefLookupFailed = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
@@ -1150,9 +1156,10 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 				loadGitState()
 			}
 			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
-			if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafe) {
+			if polecat.CleanupStatusRefutedByGit(input.CleanupStatus, gitSafe) {
 				input.IgnoreCleanupStatus = true
-				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=safe work_ref=terminal", input.CleanupStatus))
+				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("refuted_stale_cleanup_status=%s direct_git_state=safe", input.CleanupStatus))
+				input.CleanupStatus = polecat.CleanupClean
 			}
 		}
 		loadGitState()
@@ -1240,7 +1247,17 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 		input.GitCheckFailedReason = recoveryGitStateBlocker(worktreePath, gitState, gitErr)
 		return
 	}
-	if gitState == nil || gitState.Clean {
+	if gitState == nil {
+		return
+	}
+	if !gitState.PreservationMeasured {
+		// The durability comparison failed, so nothing here proves the branch's
+		// commits are safe. Fail closed rather than let an unmeasured branch
+		// pass as clean (hq-wsw).
+		input.GitCheckFailed = true
+		input.GitCheckFailedReason = fmt.Sprintf("git_state=preservation_unmeasured path=%s", worktreePath)
+	}
+	if gitState.Clean {
 		return
 	}
 	if gitState.UnpushedCommits > 0 {

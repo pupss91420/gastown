@@ -2319,13 +2319,11 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	activeMR := ""
 	sourceHint := ""
 	_, fields, err := m.agentBeads().GetAgentBead(agentID)
-	hookSafe := true
-	hookTerminal := false
 	if err != nil {
 		input.GitCheckFailed = true
 	}
 	if err == nil && fields != nil {
-		hookSafe, hookTerminal = m.hookBeadSafeForWorkstate(fields.HookBead)
+		hookSafe, _ := m.hookBeadSafeForWorkstate(fields.HookBead)
 		if !hookSafe {
 			input.HookBead = fields.HookBead
 		}
@@ -2377,16 +2375,10 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	if input.CleanupStatus == CleanupUnknown && gitSafe {
 		input.CleanupStatus = CleanupClean
 	}
-	activeMRSafe := true
-	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {
 		assessment := AssessActiveMR(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
-		}
-		activeMRSafe = !assessment.Pending
-		if assessment.SourceTerminal {
-			sourceTerminal = true
 		}
 	}
 	workIssue := issue
@@ -2396,9 +2388,9 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	input.MQCheckRequired = input.Branch != ""
 	input.HasSubmittableWork = hasSubmittableWorkForWorkstate(clonePath, targetRefs)
 	input.AssignedBeadTerminal = m.assignedBeadTerminal(workIssue)
-	workTerminal := input.AssignedBeadTerminal || sourceTerminal || hookTerminal
-	if CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe) {
+	if CleanupStatusRefutedByGit(input.CleanupStatus, gitSafe) {
 		input.IgnoreCleanupStatus = true
+		input.CleanupStatus = CleanupClean
 	}
 	input.MQNotRequired = m.mqNotRequiredSource(workIssue)
 	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {

@@ -154,10 +154,6 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			}
 			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		}
-		beadTerminal := isAssignedBeadTerminal(bd, sourceHint)
-		if activeMRAssessment.SourceTerminal {
-			beadTerminal = true
-		}
 
 		// Check cleanup_status from agent bead
 		result.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
@@ -172,10 +168,10 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			if polecatInfo != nil {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
 			}
-			hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
-			activeMRSafe := !activeMRAssessment.Pending
-			if polecat.CanIgnoreStaleCleanupStatus(result.CleanupStatus, beadTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
-				// OK: stale self-report after terminal source and direct clean git.
+			if polecat.CleanupStatusRefutedByGit(result.CleanupStatus, gitSafe) {
+				// OK: cached self-report refuted by direct clean git. The hook and
+				// active-MR checks below still raise their own reasons.
+				result.CleanupStatus = polecat.CleanupClean
 			} else {
 				result.Reasons = append(result.Reasons, cleanupStatusBlocker(result.CleanupStatus))
 			}

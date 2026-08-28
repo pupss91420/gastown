@@ -293,102 +293,127 @@ func TestCleanupStatusBlockerForRecovery_PartialSpawnWithoutHook(t *testing.T) {
 	}
 }
 
-func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
+// A persisted cleanup_status is a cached claim about git. A successful live git
+// measurement that finds the worktree safe refutes it; anything else does not.
+func TestCleanupStatusRefutedByGit(t *testing.T) {
 	tests := []struct {
-		name         string
-		status       polecat.CleanupStatus
-		workTerminal bool
-		hookSafe     bool
-		activeMRSafe bool
-		gitSafe      bool
-		wantCanSkip  bool
+		name        string
+		status      polecat.CleanupStatus
+		gitSafe     bool
+		wantRefuted bool
 	}{
 		{
-			name:         "closed source with clean git ignores stale unpushed cleanup",
-			status:       polecat.CleanupUnpushed,
-			workTerminal: true,
-			hookSafe:     true,
-			activeMRSafe: true,
-			gitSafe:      true,
-			wantCanSkip:  true,
+			name:        "clean git refutes stale unpushed cleanup",
+			status:      polecat.CleanupUnpushed,
+			gitSafe:     true,
+			wantRefuted: true,
 		},
 		{
-			name:         "open source still blocks",
-			status:       polecat.CleanupUnpushed,
-			hookSafe:     true,
-			activeMRSafe: true,
-			gitSafe:      true,
+			name:        "clean git refutes stale stash cleanup",
+			status:      polecat.CleanupStash,
+			gitSafe:     true,
+			wantRefuted: true,
 		},
 		{
-			name:         "hooked work still blocks",
-			status:       polecat.CleanupUnpushed,
-			workTerminal: true,
-			activeMRSafe: true,
-			gitSafe:      true,
+			name:        "clean git refutes stale uncommitted cleanup",
+			status:      polecat.CleanupUncommitted,
+			gitSafe:     true,
+			wantRefuted: true,
 		},
 		{
-			name:         "active MR still blocks",
-			status:       polecat.CleanupUnpushed,
-			workTerminal: true,
-			hookSafe:     true,
-			gitSafe:      true,
+			// gitSafe=false covers both "measured and dirty" and "could not be
+			// measured": callers fold a failed git check into gitSafe=false, so
+			// an unmeasured worktree never refutes anything.
+			name:   "unsafe or unmeasured git refutes nothing",
+			status: polecat.CleanupUnpushed,
 		},
 		{
-			name:         "dirty git still blocks",
-			status:       polecat.CleanupUnpushed,
-			workTerminal: true,
-			hookSafe:     true,
-			activeMRSafe: true,
+			name:    "unknown cleanup is not a git claim and still blocks",
+			status:  polecat.CleanupUnknown,
+			gitSafe: true,
 		},
 		{
-			name:         "git error still blocks",
-			status:       polecat.CleanupUnpushed,
-			workTerminal: true,
-			hookSafe:     true,
-			activeMRSafe: true,
-		},
-		{
-			name:         "closed source with clean git ignores stale stash cleanup",
-			status:       polecat.CleanupStash,
-			workTerminal: true,
-			hookSafe:     true,
-			activeMRSafe: true,
-			gitSafe:      true,
-			wantCanSkip:  true,
-		},
-		{
-			name:         "closed source with clean git ignores stale uncommitted cleanup",
-			status:       polecat.CleanupUncommitted,
-			workTerminal: true,
-			hookSafe:     true,
-			activeMRSafe: true,
-			gitSafe:      true,
-			wantCanSkip:  true,
-		},
-		{
-			name:         "unknown cleanup still blocks",
-			status:       polecat.CleanupUnknown,
-			workTerminal: true,
-			hookSafe:     true,
-			activeMRSafe: true,
-			gitSafe:      true,
-		},
-		{
-			name:         "terminal hook can satisfy work terminal predicate",
-			status:       polecat.CleanupUnpushed,
-			workTerminal: true,
-			hookSafe:     true,
-			activeMRSafe: true,
-			gitSafe:      true,
-			wantCanSkip:  true,
+			name:    "missing cleanup is not a git claim and still blocks",
+			status:  "",
+			gitSafe: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := polecat.CanIgnoreStaleCleanupStatus(tt.status, tt.workTerminal, tt.hookSafe, tt.activeMRSafe, tt.gitSafe)
-			if got != tt.wantCanSkip {
-				t.Fatalf("CanIgnoreStaleCleanupStatus() = %v, want %v", got, tt.wantCanSkip)
+			got := polecat.CleanupStatusRefutedByGit(tt.status, tt.gitSafe)
+			if got != tt.wantRefuted {
+				t.Fatalf("CleanupStatusRefutedByGit() = %v, want %v", got, tt.wantRefuted)
+			}
+		})
+	}
+}
+
+// Refuting the cached cleanup_status must not disarm any other gate. Each fact
+// that used to be a precondition of ignoring the cache raises its own blocker,
+// so a refuted cleanup_status still leaves the polecat in NEEDS_RECOVERY.
+func TestRefutedCleanupStatusStillBlocksOnOtherPredicates(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*polecat.WorkstateInput)
+		wantBlocker string
+	}{
+		{
+			name:        "open work on hook",
+			mutate:      func(in *polecat.WorkstateInput) { in.HookBead = "hq-open" },
+			wantBlocker: "has work on hook (hq-open)",
+		},
+		{
+			name:        "push failed",
+			mutate:      func(in *polecat.WorkstateInput) { in.PushFailed = true },
+			wantBlocker: "push_failed=true",
+		},
+		{
+			name:        "mr failed",
+			mutate:      func(in *polecat.WorkstateInput) { in.MRFailed = true },
+			wantBlocker: "mr_failed=true",
+		},
+		{
+			name:        "active MR still open",
+			mutate:      func(in *polecat.WorkstateInput) { in.ActiveMRBlocker = "active_mr=hq-mr status=open" },
+			wantBlocker: "active_mr=hq-mr status=open",
+		},
+		{
+			name: "live git still dirty",
+			mutate: func(in *polecat.WorkstateInput) {
+				in.GitDirty = true
+				in.GitDirtyReason = "git_state=has_uncommitted uncommitted_files=2"
+			},
+			wantBlocker: "git_state=has_uncommitted uncommitted_files=2",
+		},
+		{
+			name:        "live git still unpushed",
+			mutate:      func(in *polecat.WorkstateInput) { in.UnpushedCommits = 3 },
+			wantBlocker: "git_state=has_unpushed unpushed_commits=3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Cleanup status already refuted and rewritten to clean.
+			in := polecat.WorkstateInput{
+				State:               polecat.StateIdle,
+				CleanupStatus:       polecat.CleanupClean,
+				IgnoreCleanupStatus: true,
+			}
+			tt.mutate(&in)
+			d := polecat.DecideWorkstate(in)
+			if !d.NeedsRecovery && d.Verdict != "PENDING_MR" {
+				t.Fatalf("DecideWorkstate() = %+v, want the remaining predicate to still block", d)
+			}
+			found := false
+			for _, blocker := range d.Blockers {
+				if blocker == tt.wantBlocker {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("blockers = %v, want %q", d.Blockers, tt.wantBlocker)
 			}
 		})
 	}

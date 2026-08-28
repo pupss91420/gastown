@@ -200,12 +200,24 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	return d
 }
 
-// CanIgnoreStaleCleanupStatus returns true when a dirty persisted
-// cleanup_status is older than the direct predicates proving no work is at risk.
-// The status remains unsafe globally; callers must opt into this reconciliation
-// path only after gathering live git, hook, work, and active-MR facts.
-func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
-	if !workTerminal || !hookSafe || !activeMRSafe || !gitSafe {
+// CleanupStatusRefutedByGit returns true when a dirty persisted cleanup_status
+// makes a claim about git that a live git measurement directly refutes.
+//
+// cleanup_status is a cached observation a polecat writes about its own
+// worktree at `gt done`. Nothing invalidates it afterwards, so a status written
+// while a push was failing survives the work landing and keeps reporting
+// has_unpushed for a branch that is on origin and merged (hq-wsw: true for
+// 11 of 11 gastown polecats measured, including one with nothing to push at
+// all). Live git is authoritative over the cache and cheap to read.
+//
+// gitSafe must come from a measurement that SUCCEEDED and found the worktree
+// clean, unstashed, and its commits preserved on the durable branch — an
+// unmeasured worktree is not a safe one, and callers fold that failure into
+// gitSafe=false. Refuting the cache removes no protection: hook, push_failed,
+// mr_failed, active-MR, merge-queue, and live git state each raise their own
+// blocker in DecideWorkstate and are unaffected by this.
+func CleanupStatusRefutedByGit(status CleanupStatus, gitSafe bool) bool {
+	if !gitSafe {
 		return false
 	}
 	switch status {

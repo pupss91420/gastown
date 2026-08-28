@@ -245,9 +245,15 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 		return result
 	}
 
-	// Push failed: branch never reached origin (gas-556). Report recovery needed.
+	// Push failed: branch may never have reached origin (gas-556). Ask origin
+	// before claiming work loss — see pushFailedWorkPreserved (hq-wsw).
 	if payload.PushFailed {
 		result.Handled = true
+		if preserved, measured := pushFailedWorkPreserved(workDir, rigName, polecatName, payload.Branch); measured && preserved {
+			result.Action = fmt.Sprintf("push-failed-work-preserved for %s (branch=%s issue=%s) — push_failed is stale: the branch's commits are already durable on origin, no work at risk",
+				polecatName, payload.Branch, payload.IssueID)
+			return result
+		}
 		result.Action = fmt.Sprintf("push-failed-recovery-needed for %s (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
 			polecatName, payload.Branch, payload.IssueID)
 		townRoot, _ := workspace.Find(workDir)
@@ -1055,8 +1061,6 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		input.GitCheckFailed = true
 	}
 	gitSafe := !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0
-	activeMRSafe := true
-	sourceTerminal := fields != nil && issueID != "" && witnessIssueTerminal(rigBeads, issueID)
 	if fields != nil && fields.ActiveMR != "" {
 		sourceHint := fields.LastSourceIssue
 		if sourceHint == "" {
@@ -1066,16 +1070,13 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
 		}
-		activeMRSafe = !assessment.Pending
-		if assessment.SourceTerminal {
-			sourceTerminal = true
-		}
 	}
 	input.MQCheckRequired = input.Branch != ""
 	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath, targetRefs)
 	input.AssignedBeadTerminal = witnessIssueTerminal(rigBeads, issueID)
-	if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, input.AssignedBeadTerminal || sourceTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
+	if polecat.CleanupStatusRefutedByGit(input.CleanupStatus, gitSafe) {
 		input.IgnoreCleanupStatus = true
+		input.CleanupStatus = polecat.CleanupClean
 	}
 	input.MQNotRequired = witnessMQNotRequiredSource(rigBeads, issueID)
 	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
@@ -2476,10 +2477,17 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 		return
 	}
 
-	// Push failed: branch never reached origin. Work is committed locally only.
-	// The polecat's worktree may be in /tmp and lost on reboot. Escalate so the
-	// witness agent can investigate and trigger recovery (gas-556).
+	// Push failed: the branch may never have reached origin, leaving work
+	// committed locally only. The polecat's worktree may be in /tmp and lost on
+	// reboot. Escalate so the witness agent can investigate and trigger recovery
+	// (gas-556) — but only after asking origin, since push_failed is a latch
+	// nothing clears when the work becomes durable anyway (hq-wsw).
 	if payload.PushFailed {
+		if preserved, measured := pushFailedWorkPreserved(workDir, rigName, payload.PolecatName, payload.Branch); measured && preserved {
+			discovery.Action = fmt.Sprintf("push-failed-work-preserved (branch=%s issue=%s) — push_failed is stale: the branch's commits are already durable on origin, no work at risk",
+				payload.Branch, payload.IssueID)
+			return
+		}
 		discovery.Action = fmt.Sprintf("push-failed-recovery-needed (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
 			payload.Branch, payload.IssueID)
 		// Notify mayor so a new polecat can be dispatched if work is lost.
@@ -3458,6 +3466,46 @@ func issueStatusFromShowJSON(output string) string {
 		return item.Status
 	}
 	return ""
+}
+
+// pushFailedWorkPreserved measures whether the committed work on a polecat's
+// branch is already durable despite push_failed=true — the branch reached
+// origin, or its content already landed on the target branch.
+//
+// push_failed is a latch a polecat sets when a push errors; nothing clears it
+// when a later push, a retry, or a merge makes the work durable anyway. The
+// escalation it drives asserts "branch not on origin, possible work loss"
+// without ever asking origin. During the gastown org transfer that assertion
+// was wrong for every polecat it fired on: the branches were on origin at the
+// identical SHA and their patches were already in main (hq-wsw). An operator
+// who learns PUSH_FAILED means nothing will miss the real one.
+//
+// Returns (preserved, measured). measured=false means the question could not be
+// answered here — no town root, no worktree, the worktree sitting on a
+// different branch than the one being reported, or a git failure. Callers must
+// keep alarming when the answer is unmeasured; only a positive measurement
+// justifies standing the alarm down.
+func pushFailedWorkPreserved(workDir, rigName, polecatName, branch string) (preserved bool, measured bool) {
+	townRoot := workDirToTownRoot(workDir)
+	if townRoot == "" || rigName == "" || polecatName == "" {
+		return false, false
+	}
+	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	g := git.NewGit(clonePath)
+	current, err := g.CurrentBranch()
+	if err != nil || current == "" {
+		return false, false
+	}
+	// Preservation is measured from HEAD, so the worktree must actually be on
+	// the branch the escalation names or the answer is about something else.
+	if branch != "" && branch != current {
+		return false, false
+	}
+	status, err := g.BranchPreservationStatus(current, "origin", nil)
+	if err != nil {
+		return false, false
+	}
+	return status.Preserved, true
 }
 
 func activeMRGitSafe(workDir, rigName, polecatName string) bool {

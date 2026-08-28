@@ -2814,19 +2814,26 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 		}
 	}
 
-	if !hasEvidence {
-		for _, ref := range []string{remote + "/" + g.RemoteDefaultBranch(), remote + "/main", remote + "/master"} {
-			if resolved, ok := g.resolveComparisonRef(ref, remote); ok {
-				candidates = append(candidates, resolved)
-			}
+	// The landing branch is always consulted, as a last resort after every piece
+	// of real evidence. Work that lands by squash or rebase is still on the
+	// landing branch even when no evidence ref can see it: the upstream may be a
+	// push-disabled mirror that never receives landings, and the branch's own
+	// remote ref is deleted once it merges. Without this the gate reports
+	// landed work as unpushed (hq-wsw). Ordering keeps it harmless — an earlier
+	// candidate that already proves preservation wins, and genuinely unpushed
+	// work is not contained in the landing branch either, so it still alarms.
+	evidenceCandidates := len(nonEmptyUnique(candidates))
+	for _, ref := range []string{remote + "/" + g.RemoteDefaultBranch(), remote + "/main", remote + "/master"} {
+		if resolved, ok := g.resolveComparisonRef(ref, remote); ok {
+			candidates = append(candidates, resolved)
 		}
 	}
 
 	candidates = nonEmptyUnique(candidates)
+	if hasEvidence && evidenceCandidates == 0 {
+		return result, fmt.Errorf("no target/custody refs resolved")
+	}
 	if len(candidates) == 0 {
-		if hasEvidence {
-			return result, fmt.Errorf("no target/custody refs resolved")
-		}
 		return result, errNoComparisonRefs
 	}
 
