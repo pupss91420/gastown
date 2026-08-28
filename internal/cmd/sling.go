@@ -1051,7 +1051,9 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	fmt.Printf("%s Work attached to hook (status=hooked)\n", style.Bold.Render("✓"))
+	// Name the actual assignee: success output that omitted it is what made the
+	// silent misroute in hq-s1t invisible.
+	fmt.Printf("%s Work attached to hook: %s (status=hooked)\n", style.Bold.Render("✓"), targetAgent)
 
 	// Log sling event to activity feed
 	_ = events.LogFeed(events.TypeSling, actor, events.SlingPayload(beadID, targetAgent))

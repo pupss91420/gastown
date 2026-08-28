@@ -261,7 +261,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 	// resolve here, getting their pane for nudge delivery (gt-in7b).
 	agentID, pane, workDir, err := resolveTargetAgentFn(target)
 	if err != nil {
-		if rigName, ok := missingPolecatTargetRig(target, opts.Create, opts.TownRoot); ok {
+		if rigName, polecatName, ok := namedPolecatTarget(target, opts.TownRoot); ok {
 			if opts.BeadID != "" && !opts.Force {
 				if err := checkCrossRigGuard(opts.BeadID, rigName+"/polecats/_", opts.TownRoot); err != nil {
 					return nil, err
@@ -272,7 +272,17 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 					return nil, err
 				}
 			}
-			fmt.Printf("Target polecat has no active session, spawning fresh polecat in rig '%s'...\n", rigName)
+			// The target named one polecat. Restart that polecat's session — do
+			// not fall back to "any polecat in the rig" (hq-s1t): silently
+			// reassigning the work to a different agent while reporting success
+			// is what broke role separation.
+			if opts.DryRun {
+				fmt.Printf("Would restart polecat %s/%s (no active session)\n", rigName, polecatName)
+				result.Agent = fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+				result.Pane = "<new-pane>"
+				return result, nil
+			}
+			fmt.Printf("Polecat %s/%s has no active session, restarting it...\n", rigName, polecatName)
 			spawnOpts := SlingSpawnOptions{
 				TownRoot:      opts.TownRoot,
 				Force:         opts.Force,
@@ -283,10 +293,11 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 				BaseBranch:    opts.BaseBranch,
 				ResumeBranch:  opts.ResumeBranch,
 				SkipAdmission: opts.SkipPolecatAdmission,
+				PolecatName:   polecatName,
 			}
 			spawnInfo, spawnErr := spawnPolecatForSling(rigName, spawnOpts)
 			if spawnErr != nil {
-				return nil, fmt.Errorf("spawning polecat to replace dead polecat: %w", spawnErr)
+				return nil, fmt.Errorf("restarting polecat %s/%s: %w", rigName, polecatName, spawnErr)
 			}
 			result.Agent = spawnInfo.AgentID()
 			result.NewPolecatInfo = spawnInfo
@@ -320,25 +331,33 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 	return result, nil
 }
 
-func missingPolecatTargetRig(target string, allowShorthand bool, townRoot string) (string, bool) {
-	if isPolecatTarget(target) {
-		parts := strings.Split(target, "/")
-		return parts[0], true
-	}
-	if !allowShorthand {
-		return "", false
-	}
+// namedPolecatTarget reports whether a sling target names one specific polecat,
+// returning its rig and polecat name.
+//
+// Both spellings resolve identically (hq-s1t acceptance #2), matching
+// resolvePathToSession:
+//   - <rig>/polecats/<name> — explicit
+//   - <rig>/<name>          — shorthand, when <name> is neither a known role nor
+//     an existing crew member
+//
+// The polecat name is lowercased, as session naming already does. A bare <rig>
+// target is not a named target — that form asks for "any polecat" and keeps its
+// spawn/reuse behaviour (acceptance #4).
+func namedPolecatTarget(target, townRoot string) (rigName, polecatName string, ok bool) {
 	parts := strings.Split(target, "/")
+	if isPolecatTarget(target) {
+		return parts[0], strings.ToLower(parts[2]), true
+	}
 	if len(parts) != 2 || knownRoles[strings.ToLower(parts[1])] {
-		return "", false
+		return "", "", false
 	}
 	if townRoot == "" {
 		townRoot = detectTownRootFromCwd()
 	}
 	if townRoot != "" {
 		if info, err := os.Stat(filepath.Join(townRoot, parts[0], "crew", parts[1])); err == nil && info.IsDir() {
-			return "", false
+			return "", "", false
 		}
 	}
-	return parts[0], true
+	return parts[0], strings.ToLower(parts[1]), true
 }
