@@ -189,11 +189,25 @@ func isRoleCommand(cmd *cobra.Command) bool {
 	return false
 }
 
+// isDoneCommand reports whether cmd is the top-level `gt done` (or one of its
+// subcommands), which must prove polecat worktree ownership before any shared
+// pre-run write.
+//
+// It deliberately does NOT match on the name alone. `gt dog done` is also named
+// "done", and matching by name applied the polecat-only guard to it, so the guard
+// rejected every actor there is — dog, deacon and mayor alike. No caller could
+// succeed, dogs could never signal completion, and every dispatched dog froze in
+// state=working (gs-4o8).
 func isDoneCommand(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "done" {
-			return true
+		if c.Name() != "done" {
+			continue
 		}
+		// Only the `done` hanging directly off the root command is `gt done`.
+		// A detached command (no parent) is treated as the top-level done: that
+		// is how it looks before AddCommand, and how tests construct it.
+		parent := c.Parent()
+		return parent == nil || !parent.HasParent()
 	}
 	return false
 }
