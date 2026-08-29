@@ -1143,16 +1143,37 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			}
 		}
 		input.PartialSpawnWithoutDurableHook = partialSpawn
+		// gitSafeChecked memoises the live worktree/remote probe so the cleanup_status
+		// and push_failed reconciliations below share one ls-remote round trip.
+		gitSafeComputed := false
+		gitSafeValue := false
+		gitSafeLive := func() bool {
+			if !gitSafeComputed {
+				gitSafeValue = activeMRGitSafeForWorktree(p.ClonePath)
+				gitSafeComputed = true
+			}
+			return gitSafeValue
+		}
 		if blocker := cleanupStatusBlockerForRecovery(input.CleanupStatus, partialSpawn); blocker == "" && !input.CleanupStatus.IsSafe() {
 			input.IgnoreCleanupStatus = true
 		} else if blocker != "" {
 			if input.CleanupStatus == polecat.CleanupUnpushed {
 				loadGitState()
 			}
-			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
-			if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafe) {
+			if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafeLive()) {
 				input.IgnoreCleanupStatus = true
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=safe work_ref=terminal", input.CleanupStatus))
+			}
+		}
+		// push_failed is sticky: it is written when a push attempt fails and is never
+		// cleared when a later push succeeds, so a polecat whose work DID land stays
+		// NEEDS_RECOVERY forever and never returns to the pool. Disregard it only when
+		// live evidence contradicts it, using the same predicates as cleanup_status.
+		if input.PushFailed {
+			loadGitState()
+			if polecat.CanIgnoreStalePushFailed(input.PushFailed, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafeLive()) {
+				input.IgnorePushFailed = true
+				status.Diagnostics = append(status.Diagnostics, "ignored_stale_push_failed=true direct_git_state=safe work_ref=terminal")
 			}
 		}
 		loadGitState()
