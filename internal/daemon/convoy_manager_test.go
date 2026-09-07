@@ -2463,11 +2463,15 @@ func TestFeedFirstReadyLatchedRespawnDoesNotLaunch(t *testing.T) {
 	bdScript := `#!/bin/sh
 case "$1" in
  show) printf '[{"id":"gt-refused","status":"%s","assignee":"","description":"review_only: true"}]' "$(cat "$REFUSAL_STATE")" ;;
- update) test "$3" = "--status=blocked" || exit 9; test "$#" = 3 || exit 9; echo blocked > "$REFUSAL_STATE" ;;
+ message) echo '[{"id":"hq-message","assignee":"mayor","labels":["thread:hq-refusal"]}]' ;;
+ update) test "$3" = "--status=blocked" || exit 9; test "$#" = 4 || exit 9; echo blocked > "$REFUSAL_STATE" ;;
  *) exit 9 ;;
 esac
 `
-	gtScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REFUSAL_ALERT_LOG\"\n"
+	gtScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$REFUSAL_ALERT_LOG"
+echo '{"id":"hq-refusal","status":"ok"}'
+`
 	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(bdScript), 0755); err != nil {
 		t.Fatal(err)
 	}

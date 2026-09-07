@@ -1,6 +1,7 @@
 package convoy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/witness"
 )
@@ -20,7 +22,7 @@ import (
 // paths share this transaction. Fingerprinted escalation precedes the status
 // write, so a crash cannot silently leave blocked work without an alert. A retry
 // after a partial failure deduplicates the alert through the escalation system.
-func HandleRespawnRefusal(ctx context.Context, townRoot, issueID, gtPath string) error {
+func HandleRespawnRefusal(ctx context.Context, townRoot, issueID, gtPath string, convoyIDs ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	// Share the CLI/queue per-bead lock so intervention cannot race a sling
@@ -64,13 +66,48 @@ func HandleRespawnRefusal(ctx context.Context, townRoot, issueID, gtPath string)
 	if issue.Status != "open" || issue.Assignee != "" {
 		return nil
 	}
-	reason := fmt.Sprintf("Automatic dispatch stopped for %s: respawn limit reached. Investigate startup failure before reopening and resetting the counter. Runtime and review constraints remain on the bead.", issueID)
-	alert := exec.CommandContext(ctx, gtPath, "escalate", "Dispatch requires intervention: "+issueID, "--severity", "high", "--source", "convoy:respawn-limiter", "--related", issueID, "--fingerprint", "convoy:respawn-limiter:"+issueID, "--reason", reason)
+	convoyID := "unknown"
+	if len(convoyIDs) > 0 && convoyIDs[0] != "" {
+		convoyID = convoyIDs[0]
+	}
+	reason := fmt.Sprintf("Convoy %s: automatic dispatch stopped for %s: respawn limit reached. Investigate startup failure before reopening and resetting the counter. Runtime and review constraints remain on the bead.", convoyID, issueID)
+	alert := exec.CommandContext(ctx, gtPath, "escalate", "Dispatch requires intervention: "+issueID, "--severity", "high", "--source", "convoy:respawn-limiter", "--related", issueID, "--fingerprint", "convoy:respawn-limiter:"+issueID, "--reason", reason, "--json")
 	alert.Dir = townRoot
 	alert.Env = beads.BuildMutationRoutingBDEnv(os.Environ(), fallback)
 	util.SetProcessGroup(alert)
-	if out, err := alert.CombinedOutput(); err != nil {
-		return fmt.Errorf("escalating terminal refusal: %w: %s", err, out)
+	var stderr bytes.Buffer
+	alert.Stderr = &stderr
+	out, err := alert.Output()
+	if err != nil {
+		return fmt.Errorf("escalating terminal refusal: %w: %s", err, stderr.String())
+	}
+	var response struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil || response.ID == "" {
+		return fmt.Errorf("unverified escalation result for %s: %s", issueID, out)
+	}
+	if response.Status != "ok" && response.Status != "partial_failure" && response.Status != "duplicate_suppressed" {
+		return fmt.Errorf("unexpected escalation status %q", response.Status)
+	}
+	// Exit zero can mean partial_failure or duplicate_suppressed. Neither is
+	// delivery evidence. Inspect durable mailbox receipts, including read mail.
+	present, err := hasRefusalNotification(ctx, townRoot, response.ID)
+	if err != nil {
+		return err
+	}
+	if !present {
+		if err := sendRefusalNotification(townRoot, response.ID, reason); err != nil {
+			return fmt.Errorf("terminal notification pending: %w", err)
+		}
+		present, err = hasRefusalNotification(ctx, townRoot, response.ID)
+		if err != nil {
+			return err
+		}
+		if !present {
+			return fmt.Errorf("terminal notification receipt missing for %s", response.ID)
+		}
 	}
 	// Recheck after escalation before changing status; another actor may have
 	// paused or assigned the bead while notification was in flight.
@@ -81,7 +118,7 @@ func HandleRespawnRefusal(ctx context.Context, townRoot, issueID, gtPath string)
 	if issue.Status != "open" || issue.Assignee != "" {
 		return nil
 	}
-	if out, err := beads.CommandContext(ctx, townRoot, fallback, beads.MutationRouting, "update", issueID, "--status=blocked").CombinedOutput(); err != nil {
+	if out, err := beads.CommandContext(ctx, townRoot, fallback, beads.MutationRouting, "update", issueID, "--status=blocked", "--append-notes="+reason+" Escalation: "+response.ID+"; coordinator mailbox receipt verified.").CombinedOutput(); err != nil {
 		return fmt.Errorf("persisting terminal refusal: %w: %s", err, out)
 	}
 	issue, err = read()
@@ -92,4 +129,28 @@ func HandleRespawnRefusal(ctx context.Context, townRoot, issueID, gtPath string)
 		return fmt.Errorf("terminal refusal did not persist for %s: status=%s", issueID, issue.Status)
 	}
 	return nil
+}
+
+func hasRefusalNotification(ctx context.Context, townRoot, escalationID string) (bool, error) {
+	out, err := beads.CommandContext(ctx, townRoot, filepath.Join(townRoot, ".beads"), beads.ReadOnlyPinned, "message", "thread", escalationID, "--json").Output()
+	if err != nil {
+		return false, fmt.Errorf("checking terminal notification receipt: %w", err)
+	}
+	var receipts []mail.BeadsMessage
+	if err := json.Unmarshal(out, &receipts); err != nil {
+		return false, fmt.Errorf("invalid terminal notification receipt: %w", err)
+	}
+	for _, receipt := range receipts {
+		message := receipt.ToMessage()
+		if message.ID != "" && message.ThreadID == escalationID && mail.AddressToIdentity(message.To) == mail.AddressToIdentity("mayor/") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var sendRefusalNotification = func(townRoot, escalationID, reason string) error {
+	router := mail.NewRouter(townRoot)
+	defer router.WaitPendingNotifications()
+	return router.Send(&mail.Message{From: "convoy", To: "mayor/", Subject: "Dispatch requires intervention", Body: reason + "\nEscalation: " + escalationID, ThreadID: escalationID, Type: mail.TypeEscalation, Priority: mail.PriorityHigh})
 }

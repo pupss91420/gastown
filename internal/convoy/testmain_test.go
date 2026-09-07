@@ -8,6 +8,8 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
+var doltTestsAvailable bool
+
 func TestMain(m *testing.M) {
 	// Start an ephemeral Dolt container for this package's tests.
 	// setupTestStore sets BEADS_TEST_MODE=1, which causes the beads SDK
@@ -16,8 +18,9 @@ func TestMain(m *testing.M) {
 	// container is terminated at cleanup — preventing orphan
 	// accumulation in the shared production Dolt data dir.
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "convoy TestMain: skipping — %v\n", err)
-		os.Exit(0)
+		fmt.Fprintf(os.Stderr, "convoy TestMain: Dolt tests unavailable (%v); running mock tests\n", err)
+	} else {
+		doltTestsAvailable = true
 	}
 
 	code := m.Run()

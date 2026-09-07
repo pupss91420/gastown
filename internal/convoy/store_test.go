@@ -15,6 +15,9 @@ import (
 // Caller must run the returned cleanup when done.
 func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 	t.Helper()
+	if !doltTestsAvailable {
+		t.Skip("isolated Dolt container unavailable")
+	}
 
 	t.Setenv("BEADS_TEST_MODE", "1")
 

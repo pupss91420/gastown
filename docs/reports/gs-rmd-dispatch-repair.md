@@ -47,11 +47,16 @@ Direct and queued sling reject blocked beads unless explicitly forced. Both the
 reactive convoy feeder and daemon stranded-convoy feeder check the respawn circuit
 before starting a sling subprocess. A shared handler takes the same per-bead
 sling lock, reads the current open/unassigned state, creates a fingerprinted
-high-severity escalation, then blocks the bead and verifies that status persisted.
-Escalation precedes the status update, so a crash cannot leave silently blocked
-work; the escalation fingerprint deduplicates retries after partial failure.
-Completed work, existing pauses and live assignments are left alone. Only the
-status field is updated, retaining all retry constraints and respawn counters.
+high-severity escalation, verifies a persisted mayor mailbox receipt in that
+escalation thread, then blocks the bead and verifies that status persisted.
+An escalation process can exit zero with `partial_failure`, and a later invocation
+can return `duplicate_suppressed` without delivering the missing mail. Neither
+counts as a receipt. The handler reads structured thread records, retries missing
+mail in the same thread, and verifies persistence before blocking. Failed or
+unverified notification remains retryable, rather than becoming silently blocked.
+The blocked bead's notes name the convoy, bead, reason and escalation. Completed
+work, existing pauses and live assignments are left alone. Status and appended
+notes are the only mutations, retaining retry constraints and respawn counters.
 The stranded-convoy readiness predicate also explicitly excludes blocked/deferred
 statuses instead of considering unassigned paused work orphaned. Existing
 per-bead sling locks still serialize dispatch. Rollback re-reads operator state, retains blocked/deferred status, refuses
@@ -70,6 +75,13 @@ suite encountered three unrelated failures because inherited `GT_DOLT_PORT=3307`
 overrode ports in test fixtures; all three pass with that environment variable
 removed from the test process. The corrected full suite passes with `env -u GT_DOLT_PORT go test ./...`.
 The later diagnostic-preservation addition also passes targeted tests and vet.
+Review found the convoy package's old TestMain exited successfully without running
+any tests when Docker was absent. That harness is fixed: pure mock tests run;
+only isolated-Dolt store tests skip. Verbose RUN/PASS evidence in
+`build/notification-receipt-tests.log` covers both feeders, delivery failure,
+undelivered duplicate retry, missing receipt rejection and active-assignee safety.
+Stateful command tests also exercise rollback followed by flagless queue and
+single-sling retry, preserving runtime/account and review constraints.
 
 The observed-selection candidate passed fresh Claude `gs-hr9` and reused Claude
 `gs-m3t` (same directory inode 229205), with exit 0, live panes and exact-hook

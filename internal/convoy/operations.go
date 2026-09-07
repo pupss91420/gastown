@@ -340,7 +340,7 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		}
 
 		logger("%s: convoy %s: feeding next ready issue %s to %s", caller, convoyID, issue.ID, rig)
-		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch); err != nil {
+		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch, convoyID); err != nil {
 			logger("%s: convoy %s: dispatch %s failed: %s", caller, convoyID, issue.ID, util.FirstLine(err.Error()))
 			continue // Try next issue on dispatch failure
 		}
@@ -610,9 +610,9 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 // dispatchIssue dispatches an issue to a rig via gt sling.
 // The context parameter enables cancellation on daemon shutdown.
 // gtPath is the resolved path to the gt binary.
-func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch string) error {
+func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch string, convoyIDs ...string) error {
 	if witness.ShouldBlockRespawn(townRoot, issueID) {
-		if err := HandleRespawnRefusal(ctx, townRoot, issueID, gtPath); err != nil {
+		if err := HandleRespawnRefusal(ctx, townRoot, issueID, gtPath, convoyIDs...); err != nil {
 			return fmt.Errorf("%s requires intervention: respawn circuit open: %w", issueID, err)
 		}
 		return fmt.Errorf("%s requires intervention: respawn circuit open", issueID)
