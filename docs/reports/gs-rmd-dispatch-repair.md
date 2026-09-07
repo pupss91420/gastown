@@ -51,8 +51,9 @@ high-severity escalation, verifies a persisted mayor mailbox receipt in that
 escalation thread, then blocks the bead and verifies that status persisted.
 An escalation process can exit zero with `partial_failure`, and a later invocation
 can return `duplicate_suppressed` without delivering the missing mail. Neither
-counts as a receipt. The handler reads structured thread records, retries missing
-mail in the same thread, and verifies persistence before blocking. Failed or
+counts as a receipt. The handler reads structured thread-label records through
+`bd query --all --limit 0 --json`, verified against installed bd 1.2.2 (which
+has no `message thread` command), retries missing mail in the same thread, and verifies persistence before blocking. Failed or
 unverified notification remains retryable, rather than becoming silently blocked.
 The blocked bead's notes name the convoy, bead, reason and escalation. Completed
 work, existing pauses and live assignments are left alone. Status and appended

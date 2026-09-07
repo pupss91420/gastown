@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,7 +133,7 @@ func HandleRespawnRefusal(ctx context.Context, townRoot, issueID, gtPath string,
 }
 
 func hasRefusalNotification(ctx context.Context, townRoot, escalationID string) (bool, error) {
-	out, err := beads.CommandContext(ctx, townRoot, filepath.Join(townRoot, ".beads"), beads.ReadOnlyPinned, "message", "thread", escalationID, "--json").Output()
+	out, err := beads.CommandContext(ctx, townRoot, filepath.Join(townRoot, ".beads"), beads.ReadOnlyPinned, "query", "label="+strconv.Quote("thread:"+escalationID), "--all", "--limit", "0", "--json").Output()
 	if err != nil {
 		return false, fmt.Errorf("checking terminal notification receipt: %w", err)
 	}

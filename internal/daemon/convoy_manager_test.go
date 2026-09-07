@@ -2463,7 +2463,7 @@ func TestFeedFirstReadyLatchedRespawnDoesNotLaunch(t *testing.T) {
 	bdScript := `#!/bin/sh
 case "$1" in
  show) printf '[{"id":"gt-refused","status":"%s","assignee":"","description":"review_only: true"}]' "$(cat "$REFUSAL_STATE")" ;;
- message) echo '[{"id":"hq-message","assignee":"mayor","labels":["thread:hq-refusal"]}]' ;;
+ query) echo '[{"id":"hq-message","assignee":"mayor","labels":["thread:hq-refusal"]}]' ;;
  update) test "$3" = "--status=blocked" || exit 9; test "$#" = 4 || exit 9; echo blocked > "$REFUSAL_STATE" ;;
  *) exit 9 ;;
 esac
