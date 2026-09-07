@@ -14,6 +14,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 // CheckConvoysForIssue finds any convoys tracking the given issue and triggers
@@ -335,6 +336,11 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 
 		if isRigParked(rig) {
 			logger("%s: convoy %s: rig %s is parked, skipping %s", caller, convoyID, rig, issue.ID)
+			continue
+		}
+
+		if witness.ShouldBlockRespawn(townRoot, issue.ID) {
+			logger("%s: convoy %s: %s requires intervention: respawn circuit open", caller, convoyID, issue.ID)
 			continue
 		}
 

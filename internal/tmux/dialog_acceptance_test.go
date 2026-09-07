@@ -1,6 +1,11 @@
 package tmux
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -163,11 +168,10 @@ func TestAcceptStartupDialogs_NoDialogs(t *testing.T) {
 func TestAcceptWorkspaceTrustDialog_InvalidSession(t *testing.T) {
 	tm := newTestTmux(t)
 
-	// Should not panic or hang — should return nil after timeout
+	// A vanished pane must be reported as an observation failure.
 	err := tm.AcceptWorkspaceTrustDialog("gt-nonexistent-session-xyz")
-	// CapturePane errors are retried until timeout, then returns nil
-	if err != nil {
-		t.Fatalf("expected nil error for nonexistent session, got: %v", err)
+	if err == nil {
+		t.Fatal("expected observation error for nonexistent session")
 	}
 }
 
@@ -342,5 +346,102 @@ func TestDismissStartupDialogsBlind_InvalidSession(t *testing.T) {
 	// Should return an error since the session doesn't exist
 	if err == nil {
 		t.Error("expected error for nonexistent session, got nil")
+	}
+}
+
+func TestWorkspaceTrustKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name, screen string
+		keys         []string
+	}{
+		{"claude reversed default", "Quick safety check\n❯ No, exit\n  Yes, I trust this folder", []string{"Down", "Enter"}},
+		{"claude old default", "Quick safety check\n❯ 1. Yes, I trust this folder\n  2. No, exit", []string{"Enter"}},
+		{"codex decline selected", "Do you trust the contents of this directory?\n  1. Yes, continue\n› 2. No, quit", []string{"Up", "Enter"}},
+		{"codex accept selected", "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit", []string{"Enter"}},
+		{"unknown selection", "Quick safety check\nNo, exit\nYes, I trust this folder", nil},
+		{"unknown acceptance", "Quick safety check\n❯ No, exit\nMaybe", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := workspaceTrustKeys(tt.screen)
+			if tt.keys == nil {
+				if err == nil {
+					t.Fatal("unknown menu accepted")
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, tt.keys) {
+				t.Fatalf("keys=%v err=%v, want %v", got, err, tt.keys)
+			}
+		})
+	}
+}
+
+func TestStartupDialogHistoryWithPopulatedComposer(t *testing.T) {
+	for _, prompt := range []string{"› Run gt prime", "❯ Implement the assignment"} {
+		screen := "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit\n" + prompt + "\nWorking (esc to interrupt)"
+		if name, blocked := containsBlockingStartupDialog(screen); blocked {
+			t.Fatalf("historical dialog classified active: %s", name)
+		}
+	}
+	for _, screen := range []string{"Quick safety check\n❯ No, exit\nYes, I trust this folder", "Do you trust the contents of this directory?\n› 1. Yes, continue\n2. No, quit"} {
+		if _, blocked := containsBlockingStartupDialog(screen); !blocked {
+			t.Fatal("menu selection mistaken for composer")
+		}
+	}
+}
+
+// Exercise the actual tmux key delivery against a delayed, raw-mode TUI. A
+// bare Enter selects No and exits, reproducing the observed Claude failure.
+func TestAcceptWorkspaceTrustDialogChangedDefaultLive(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 required")
+	}
+	tm := newTestTmux(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "dialog.py")
+	report := filepath.Join(dir, "keys")
+	source := `import os, sys, time, tty
+ tty.setraw(sys.stdin.fileno())
+ time.sleep(9)
+ print("\033[2J\033[HQuick safety check\r\n\r\n❯ No, exit\r\n  Yes, I trust this folder\r\nEnter to confirm", flush=True)
+ keys = b""
+ while not keys.endswith(b"\r"):
+  keys += os.read(sys.stdin.fileno(), 1)
+ open(sys.argv[1], "w").write(keys.hex())
+ if keys not in (b"\x1b[B\r", b"\x1bOB\r"):
+  sys.exit(1)
+ print("\033[2J\033[H❯ ", flush=True)
+ time.sleep(30)
+`
+	// Python top-level statements must be unindented.
+	source = strings.ReplaceAll(source, "\n ", "\n")
+	if err := os.WriteFile(script, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	session := "gt-test-trust-reversed"
+	if err := tm.NewSessionWithCommand(session, dir, "python3 "+script+" "+report); err != nil {
+		t.Fatal(err)
+	}
+	defer tm.KillSession(session)
+	if err := tm.AcceptStartupDialogs(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.CheckStartupBlocked(session); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "1b5b420d" && string(data) != "1b4f420d" {
+		t.Fatalf("wrong keys: %s", data)
+	}
+}
+
+func TestCheckStartupBlockedMissingPane(t *testing.T) {
+	tm := newTestTmux(t)
+	err := tm.CheckStartupBlocked("gt-missing-startup")
+	if err == nil || !strings.Contains(err.Error(), "startup observation failed") || strings.Contains(err.Error(), "dialog still visible") {
+		t.Fatalf("wrong classification: %v", err)
 	}
 }

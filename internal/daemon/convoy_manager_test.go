@@ -14,6 +14,8 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 // setupTestStore opens a real beads database for integration tests.
@@ -2444,5 +2446,24 @@ func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
 				t.Errorf("expected HWM-advance log message, got: %v", logged)
 			}
 		})
+	}
+}
+
+func TestFeedFirstReadyLatchedRespawnDoesNotLaunch(t *testing.T) {
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "witness"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < config.DefaultWitnessMaxBeadRespawns; i++ {
+		witness.RecordBeadRespawn(town, "gt-refused")
+	}
+	var log []string
+	manager := NewConvoyManager(town, func(format string, args ...interface{}) { log = append(log, fmt.Sprintf(format, args...)) }, "must-not-launch-gt", time.Minute, nil, nil, nil)
+	for i := 0; i < 3; i++ {
+		manager.feedFirstReady(strandedConvoyInfo{ID: "hq-probe", ReadyIssues: []string{"gt-refused"}})
+	}
+	text := strings.Join(log, "\n")
+	if strings.Count(text, "respawn circuit open") != 3 || strings.Contains(text, "feeding") || strings.Contains(text, "sling gt-refused failed") {
+		t.Fatalf("latched circuit retried: %s", text)
 	}
 }

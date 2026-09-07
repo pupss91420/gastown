@@ -13,19 +13,20 @@ import (
 // AttachmentFields holds the attachment info for pinned beads.
 // These fields track which molecule is attached to a handoff/pinned bead.
 type AttachmentFields struct {
-	AttachedMolecule string   // Root issue ID of the attached molecule
-	AttachedFormula  string   // Formula name (e.g., "mol-polecat-work") for inline step display
-	AttachedAt       string   // ISO 8601 timestamp when attached
-	AttachedArgs     string   // Natural language args passed via gt sling --args (no-tmux mode)
-	AttachedVars     []string // Formula variables passed via gt sling --var
-	DispatchedBy     string   // Agent ID that dispatched this work (for completion notification)
-	NoMerge          bool     // If true, gt done skips merge queue (for upstream PRs/human review)
-	ReviewOnly       bool     // If true, assignee must evaluate and report back — no merge/commit/push
-	Mode             string   // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
-	ConvoyID         string   // Convoy bead ID tracking this issue (e.g., "hq-cv-abc")
-	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local", or "" (default = mr)
-	ConvoyOwned      bool     // If true, convoy has gt:owned label (caller-managed lifecycle)
-	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
+	DispatchConstraints string   // JSON retry contract, retained across attachment rollback
+	AttachedMolecule    string   // Root issue ID of the attached molecule
+	AttachedFormula     string   // Formula name (e.g., "mol-polecat-work") for inline step display
+	AttachedAt          string   // ISO 8601 timestamp when attached
+	AttachedArgs        string   // Natural language args passed via gt sling --args (no-tmux mode)
+	AttachedVars        []string // Formula variables passed via gt sling --var
+	DispatchedBy        string   // Agent ID that dispatched this work (for completion notification)
+	NoMerge             bool     // If true, gt done skips merge queue (for upstream PRs/human review)
+	ReviewOnly          bool     // If true, assignee must evaluate and report back — no merge/commit/push
+	Mode                string   // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
+	ConvoyID            string   // Convoy bead ID tracking this issue (e.g., "hq-cv-abc")
+	MergeStrategy       string   // Convoy merge strategy: "direct", "mr", "local", or "" (default = mr)
+	ConvoyOwned         bool     // If true, convoy has gt:owned label (caller-managed lifecycle)
+	FormulaVars         string   // Newline-separated key=value pairs for formula template substitution
 }
 
 // ParseAttachmentFields extracts attachment fields from an issue's description.
@@ -59,6 +60,9 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 
 		// Map keys to fields (case-insensitive)
 		switch strings.ToLower(key) {
+		case "dispatch_constraints":
+			fields.DispatchConstraints = value
+			hasFields = true
 		case "attached_molecule", "attached-molecule", "attachedmolecule":
 			fields.AttachedMolecule = value
 			hasFields = true
@@ -128,6 +132,9 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	if fields.AttachedAt != "" {
 		lines = append(lines, "attached_at: "+fields.AttachedAt)
 	}
+	if fields.DispatchConstraints != "" {
+		lines = append(lines, "dispatch_constraints: "+fields.DispatchConstraints)
+	}
 	if fields.AttachedArgs != "" {
 		lines = append(lines, "attached_args: "+fields.AttachedArgs)
 	}
@@ -170,44 +177,45 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 	// Known attachment field keys (lowercase)
 	attachmentKeys := map[string]bool{
-		"attached_molecule": true,
-		"attached-molecule": true,
-		"attachedmolecule":  true,
-		"attached_formula":  true,
-		"attached-formula":  true,
-		"attachedformula":   true,
-		"attached_at":       true,
-		"attached-at":       true,
-		"attachedat":        true,
-		"attached_args":     true,
-		"attached-args":     true,
-		"attachedargs":      true,
-		"attached_vars":     true,
-		"attached-vars":     true,
-		"attachedvars":      true,
-		"dispatched_by":     true,
-		"dispatched-by":     true,
-		"dispatchedby":      true,
-		"no_merge":          true,
-		"no-merge":          true,
-		"nomerge":           true,
-		"review_only":       true,
-		"review-only":       true,
-		"reviewonly":        true,
-		"mode":              true,
-		"convoy_id":         true,
-		"convoy-id":         true,
-		"convoyid":          true,
-		"convoy":            true,
-		"merge_strategy":    true,
-		"merge-strategy":    true,
-		"mergestrategy":     true,
-		"convoy_owned":      true,
-		"convoy-owned":      true,
-		"convoyowned":       true,
-		"formula_vars":      true,
-		"formula-vars":      true,
-		"formulavars":       true,
+		"dispatch_constraints": true,
+		"attached_molecule":    true,
+		"attached-molecule":    true,
+		"attachedmolecule":     true,
+		"attached_formula":     true,
+		"attached-formula":     true,
+		"attachedformula":      true,
+		"attached_at":          true,
+		"attached-at":          true,
+		"attachedat":           true,
+		"attached_args":        true,
+		"attached-args":        true,
+		"attachedargs":         true,
+		"attached_vars":        true,
+		"attached-vars":        true,
+		"attachedvars":         true,
+		"dispatched_by":        true,
+		"dispatched-by":        true,
+		"dispatchedby":         true,
+		"no_merge":             true,
+		"no-merge":             true,
+		"nomerge":              true,
+		"review_only":          true,
+		"review-only":          true,
+		"reviewonly":           true,
+		"mode":                 true,
+		"convoy_id":            true,
+		"convoy-id":            true,
+		"convoyid":             true,
+		"convoy":               true,
+		"merge_strategy":       true,
+		"merge-strategy":       true,
+		"mergestrategy":        true,
+		"convoy_owned":         true,
+		"convoy-owned":         true,
+		"convoyowned":          true,
+		"formula_vars":         true,
+		"formula-vars":         true,
+		"formulavars":          true,
 	}
 
 	// Collect non-attachment lines from existing description

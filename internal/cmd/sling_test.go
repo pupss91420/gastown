@@ -4623,6 +4623,11 @@ func TestSlingRejectsDeferredBead(t *testing.T) {
 		wantError string // expected error substring, empty = no error expected
 	}{
 		{
+			name:      "blocked status is rejected",
+			bdOutput:  `[{"title":"Paused audit","status":"blocked","assignee":"","description":"owner pause"}]`,
+			wantError: "refusing to sling blocked bead",
+		},
+		{
 			name:      "deferred status is rejected",
 			bdOutput:  `[{"title":"Epic cleanup","status":"deferred","assignee":"","description":"some task"}]`,
 			wantError: "refusing to sling deferred bead",

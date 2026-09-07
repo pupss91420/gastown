@@ -139,6 +139,25 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		return result, fmt.Errorf("bead %s is %s (work already completed)", params.BeadID, info.Status)
 	}
 
+	if info.Status == "blocked" && !params.Force {
+		result.ErrMsg = "blocked"
+		return result, fmt.Errorf("refusing to sling blocked bead %s; resolve the blocker before dispatch", params.BeadID)
+	}
+
+	constraints, err := mergeDispatchConstraints(info, dispatchConstraints{
+		Agent: params.Agent, Account: params.Account, ReviewOnly: params.ReviewOnly,
+		NoMerge: params.NoMerge, HookRawBead: params.HookRawBead, Owned: params.Owned,
+	})
+	if err != nil {
+		return result, err
+	}
+	params.Agent, params.Account = constraints.Agent, constraints.Account
+	params.ReviewOnly, params.NoMerge = constraints.ReviewOnly, constraints.NoMerge
+	params.HookRawBead, params.Owned = constraints.HookRawBead, constraints.Owned
+	if params.HookRawBead {
+		params.FormulaName = ""
+	}
+
 	// Save explicit force state before dead-agent auto-force, so the deferred
 	// gate below still requires an explicit --force for deferred beads.
 	explicitForce := params.Force
@@ -170,6 +189,10 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			result.ErrMsg = err.Error()
 			return result, err
 		}
+	}
+
+	if err := persistDispatchConstraints(townRoot, params.BeadID, info, constraints); err != nil {
+		return result, err
 	}
 
 	// Send LIFECYCLE:Shutdown to the witness when force-stealing a bead from a

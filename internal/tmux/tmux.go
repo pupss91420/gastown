@@ -1960,27 +1960,64 @@ func (t *Tmux) NudgePane(pane, message string) error {
 //
 // Call this after starting the agent and waiting for it to initialize (WaitForCommand),
 // but before sending any prompts. Idempotent: safe to call on sessions without dialogs.
-func (t *Tmux) AcceptStartupDialogs(session string) error {
-	if err := t.AcceptWorkspaceTrustDialog(session); err != nil {
-		return fmt.Errorf("workspace trust dialog: %w", err)
+func (t *Tmux) AcceptStartupDialogs(session string) (retErr error) {
+	var lastScreen string
+	defer func() {
+		if retErr != nil {
+			retErr = &startupFailure{err: retErr, screen: lastScreen}
+		}
+	}()
+	deadline := time.Now().Add(constants.ClaudeStartTimeout)
+	var handled string
+	for time.Now().Before(deadline) {
+		content, err := t.run("capture-pane", "-p", "-t", session)
+		if err != nil {
+			return fmt.Errorf("startup observation failed for %s (last dialog: %q): %w", session, handled, err)
+		}
+		lastScreen = content
+		blocker, blocked := containsBlockingStartupDialog(content)
+		if !blocked {
+			if containsPromptIndicator(content) || lastPromptIndicatorLine(content) >= 0 {
+				return nil
+			}
+			handled = ""
+		} else if blocker != handled {
+			switch blocker {
+			case "workspace trust prompt":
+				err = t.AcceptWorkspaceTrustDialog(session)
+			case "bypass permissions prompt":
+				err = t.AcceptBypassPermissionsWarning(session)
+			default:
+				return fmt.Errorf("interactive startup dialog in %s requires intervention: %s", session, blocker)
+			}
+			if err != nil {
+				return fmt.Errorf("%s: %w", blocker, err)
+			}
+			handled = blocker
+		}
+		time.Sleep(constants.DialogPollInterval)
 	}
-	if err := t.AcceptBypassPermissionsWarning(session); err != nil {
-		return fmt.Errorf("bypass permissions warning: %w", err)
-	}
-	return nil
+	return fmt.Errorf("startup readiness timeout in %s (last dialog: %q)", session, handled)
 }
 
 // CheckStartupBlocked fails fast when a known interactive startup modal is
 // still visible after dialog acceptance. These modals block automated sessions
 // from receiving or acting on the bootstrap prompt.
-func (t *Tmux) CheckStartupBlocked(session string) error {
+func (t *Tmux) CheckStartupBlocked(session string) (retErr error) {
+	var lastScreen string
+	defer func() {
+		if retErr != nil {
+			retErr = &startupFailure{err: retErr, screen: lastScreen}
+		}
+	}()
 	deadline := time.Now().Add(constants.DialogPollTimeout)
 	var blocker string
 	for {
-		content, err := t.CapturePane(session, 80)
+		content, err := t.run("capture-pane", "-p", "-t", session)
 		if err != nil {
-			return err
+			return fmt.Errorf("startup observation failed for %s (last blocker: %q): %w", session, blocker, err)
 		}
+		lastScreen = content
 		current, ok := containsBlockingStartupDialog(content)
 		if !ok {
 			return nil
@@ -1996,7 +2033,7 @@ func (t *Tmux) CheckStartupBlocked(session string) error {
 // AcceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?". In both cases the safe
-// continue option is pre-selected, so Enter accepts the dialog.
+// continue option is selected explicitly from the rendered menu.
 //
 // Uses a polling loop instead of a single check to handle the race condition where
 // the agent hasn't rendered the dialog yet when we first check. Exits early if the
@@ -2004,18 +2041,20 @@ func (t *Tmux) CheckStartupBlocked(session string) error {
 func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 	deadline := time.Now().Add(constants.DialogPollTimeout)
 	for time.Now().Before(deadline) {
-		content, err := t.CapturePane(session, 30)
+		content, err := t.run("capture-pane", "-p", "-t", session)
 		if err != nil {
-			time.Sleep(constants.DialogPollInterval)
-			continue
+			return fmt.Errorf("observing workspace trust dialog in %s: %w", session, err)
 		}
 
 		// Look for characteristic trust dialog text before prompt detection.
 		// Codex trust screens include a leading ">" banner line, so prompt
 		// detection alone would exit too early.
-		if containsWorkspaceTrustDialog(content) {
-			// Dialog found — accept it (option 1 is pre-selected, just press Enter)
-			if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
+		if containsWorkspaceTrustDialog(content) && !promptAppearsAfterStartupBlocker(content) {
+			keys, err := workspaceTrustKeys(content)
+			if err != nil {
+				return err
+			}
+			if _, err := t.run(append([]string{"send-keys", "-t", session}, keys...)...); err != nil {
 				return err
 			}
 			// Wait for dialog to dismiss before proceeding
@@ -2035,6 +2074,48 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 
 	// Timeout — no dialog detected, safe to proceed
 	return nil
+}
+
+// workspaceTrustKeys selects the affirmative option using the visible selection,
+// never assuming that a runtime version defaults to accepting trust. Unknown
+// layouts fail closed instead of sending Enter to a potentially destructive choice.
+func workspaceTrustKeys(content string) ([]string, error) {
+	selected, accept, count := -1, -1, 0
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		marked := strings.HasPrefix(line, "❯ ") || strings.HasPrefix(line, "› ") || strings.HasPrefix(line, "> ")
+		label := strings.TrimSpace(strings.TrimLeft(line, "❯›>"))
+		label = startupOptionNumber.ReplaceAllString(label, "")
+		if !strings.HasPrefix(label, "Yes,") && !strings.HasPrefix(label, "No,") {
+			continue
+		}
+		if marked {
+			selected = count
+		}
+		if label == "Yes, I trust this folder" || label == "Yes, continue" {
+			accept = count
+		}
+		count++
+	}
+	if selected < 0 || accept < 0 {
+		return nil, fmt.Errorf("unrecognized workspace trust menu; refusing to guess acceptance key")
+	}
+	var keys []string
+	for i := selected; i < accept; i++ {
+		keys = append(keys, "Down")
+	}
+	for i := selected; i > accept; i-- {
+		keys = append(keys, "Up")
+	}
+	return append(keys, "Enter"), nil
+}
+
+var startupOptionNumber = regexp.MustCompile(`^\d+[.)]\s*`)
+var startupOptionLabel = regexp.MustCompile(`^(\d+[.)]\s*|Yes,|No,|Update now|Skip)`)
+
+func startupMenuOption(line string) bool {
+	label := strings.TrimSpace(strings.TrimLeft(line, "❯›>"))
+	return startupOptionLabel.MatchString(label)
 }
 
 func containsWorkspaceTrustDialog(content string) bool {
@@ -2125,6 +2206,10 @@ func lastPromptIndicatorLine(content string) int {
 		if trimmed == "" {
 			continue
 		}
+		if (strings.HasPrefix(trimmed, "› ") || strings.HasPrefix(trimmed, "❯ ")) && !startupMenuOption(trimmed) {
+			last = i
+			continue
+		}
 		for _, suffix := range promptSuffixes {
 			if strings.HasSuffix(trimmed, suffix) {
 				last = i
@@ -2150,14 +2235,13 @@ func lastPromptIndicatorLine(content string) int {
 func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 	deadline := time.Now().Add(constants.DialogPollTimeout)
 	for time.Now().Before(deadline) {
-		content, err := t.CapturePane(session, 30)
+		content, err := t.run("capture-pane", "-p", "-t", session)
 		if err != nil {
-			time.Sleep(constants.DialogPollInterval)
-			continue
+			return fmt.Errorf("observing bypass dialog in %s: %w", session, err)
 		}
 
 		// Look for the characteristic warning text
-		if strings.Contains(content, "Bypass Permissions mode") {
+		if strings.Contains(content, "Bypass Permissions mode") && !promptAppearsAfterStartupBlocker(content) {
 			// Dialog found — press Down to select "Yes, I accept" then Enter
 			if _, err := t.run("send-keys", "-t", session, "Down"); err != nil {
 				return err

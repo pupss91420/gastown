@@ -261,10 +261,15 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 
 	// 10. Accept startup dialogs (workspace trust + bypass permissions).
 	if cfg.AcceptBypass {
-		_ = t.AcceptStartupDialogs(cfg.SessionID)
-		if err := t.CheckStartupBlocked(cfg.SessionID); err != nil {
+		if err := t.AcceptStartupDialogs(cfg.SessionID); err != nil {
+			err = tmux.PreserveStartupFailure(cfg.TownRoot, cfg.SessionID, err)
 			_ = t.KillSessionWithProcesses(cfg.SessionID)
-			return nil, fmt.Errorf("startup blocked: %w", err)
+			return nil, fmt.Errorf("startup dialog handling failed: %w", err)
+		}
+		if err := t.CheckStartupBlocked(cfg.SessionID); err != nil {
+			err = tmux.PreserveStartupFailure(cfg.TownRoot, cfg.SessionID, err)
+			_ = t.KillSessionWithProcesses(cfg.SessionID)
+			return nil, fmt.Errorf("startup verification failed: %w", err)
 		}
 	}
 
@@ -289,8 +294,9 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 			return nil, fmt.Errorf("session %s died during startup (agent command may have failed)", cfg.SessionID)
 		}
 		if err := t.CheckStartupBlocked(cfg.SessionID); err != nil {
+			err = tmux.PreserveStartupFailure(cfg.TownRoot, cfg.SessionID, err)
 			_ = t.KillSessionWithProcesses(cfg.SessionID)
-			return nil, fmt.Errorf("startup blocked: %w", err)
+			return nil, fmt.Errorf("startup verification failed: %w", err)
 		}
 		if status := t.CheckSessionHealth(cfg.SessionID, 0); status != tmux.SessionHealthy {
 			_ = t.KillSessionWithProcesses(cfg.SessionID)

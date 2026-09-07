@@ -257,6 +257,17 @@ func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, rigName, convoyID stri
 			style.Dim.Render("○"), spawnInfo.PolecatName)
 	}
 
+	if spawnInfo.SessionName != "" {
+		if alive, verifyErr := t.HasSession(spawnInfo.SessionName); verifyErr != nil || alive {
+			fmt.Printf("  %s Rollback session verification failed for %s: alive=%t error=%v\n", style.Dim.Render("Warning:"), spawnInfo.SessionName, alive, verifyErr)
+		}
+	}
+	if spawnInfo.ClonePath != "" {
+		if _, verifyErr := os.Stat(spawnInfo.ClonePath); !os.IsNotExist(verifyErr) {
+			fmt.Printf("  %s Rollback worktree removal unverified for %s: %v\n", style.Dim.Render("Warning:"), spawnInfo.ClonePath, verifyErr)
+		}
+	}
+
 	// Delete the git branch if we know it (following nukePolecatFull pattern)
 	if spawnInfo.Branch != "" {
 		repoGit := getRepoGitForRig(r.Path)

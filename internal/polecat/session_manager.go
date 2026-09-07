@@ -523,10 +523,15 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	debugSession("WaitForCommand", m.tmux.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout))
 
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear
-	debugSession("AcceptStartupDialogs", m.tmux.AcceptStartupDialogs(sessionID))
-	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
+	if err := m.tmux.AcceptStartupDialogs(sessionID); err != nil {
+		err = tmux.PreserveStartupFailure(townRoot, sessionID, err)
 		_ = m.tmux.KillSessionWithProcesses(sessionID)
-		return fmt.Errorf("startup blocked: %w", err)
+		return fmt.Errorf("startup dialog handling failed: %w", err)
+	}
+	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
+		err = tmux.PreserveStartupFailure(townRoot, sessionID, err)
+		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		return fmt.Errorf("startup verification failed: %w", err)
 	}
 
 	// Wait for runtime to be fully ready at the prompt (not just started).
@@ -534,8 +539,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// falling back to ReadyDelayMs sleep for agents without prompt detection.
 	debugSession("WaitForRuntimeReady", m.tmux.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout))
 	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
+		err = tmux.PreserveStartupFailure(townRoot, sessionID, err)
 		_ = m.tmux.KillSessionWithProcesses(sessionID)
-		return fmt.Errorf("startup blocked: %w", err)
+		return fmt.Errorf("startup verification failed: %w", err)
 	}
 
 	// Handle fallback nudges for non-hook agents.

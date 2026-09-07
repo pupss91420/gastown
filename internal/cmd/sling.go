@@ -638,6 +638,21 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("refusing to sling deferred bead %s: %q\nDeferred work should not consume polecat slots. Use --force to override", beadID, info.Title)
 	}
 
+	if info.Status == "blocked" && !slingForce {
+		return fmt.Errorf("refusing to sling blocked bead %s; resolve the blocker before dispatch", beadID)
+	}
+
+	constraints, err := mergeDispatchConstraints(info, dispatchConstraints{
+		Agent: slingAgent, Account: slingAccount, ReviewOnly: slingReviewOnly,
+		NoMerge: slingNoMerge, HookRawBead: slingHookRawBead, Owned: slingOwned,
+	})
+	if err != nil {
+		return err
+	}
+	slingAgent, slingAccount = constraints.Agent, constraints.Account
+	slingReviewOnly, slingNoMerge = constraints.ReviewOnly, constraints.NoMerge
+	slingHookRawBead, slingOwned = constraints.HookRawBead, constraints.Owned
+
 	originalStatus := info.Status
 	originalAssignee := info.Assignee
 	force := slingForce // local copy to avoid mutating package-level flag
@@ -708,6 +723,11 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	var target string
 	if len(args) > 1 {
 		target = args[1]
+	}
+	if !slingDryRun {
+		if err := persistDispatchConstraints(townRoot, beadID, info, constraints); err != nil {
+			return err
+		}
 	}
 	resolved, err := resolveTarget(target, ResolveTargetOptions{
 		DryRun:       slingDryRun,
@@ -1411,19 +1431,43 @@ func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, 
 				}
 			}
 
-			// 2. Unhook the bead (set status back to open so it can be re-slung).
-			unhookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
-			if err := BdCmd("update", beadID, "--status=open", "--assignee=").
-				Dir(unhookDir).
-				WithAutoCommit().
-				Run(); err != nil {
-				fmt.Printf("  %s Could not unhook bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+			// Re-read immediately before unhook: an owner may have blocked the
+			// bead while startup was running. Rollback must retain that pause.
+			current, readErr := getBeadInfoForRollback(beadID)
+			status, canUnhook := rollbackUnhookStatus(current, spawnInfo.AgentID())
+			if readErr != nil || !canUnhook {
+				fmt.Printf("  %s Rollback did not change bead %s: state changed or unreadable (%v)\n", style.Dim.Render("Warning:"), beadID, readErr)
 			} else {
-				fmt.Printf("  %s Unhooked bead %s\n", style.Dim.Render("○"), beadID)
+				unhookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
+				if err := BdCmd("update", beadID, "--status="+status, "--assignee=").Dir(unhookDir).WithAutoCommit().Run(); err != nil {
+					fmt.Printf("  %s Could not unhook bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+				} else if observed, verifyErr := getBeadInfoForRollback(beadID); verifyErr != nil || observed == nil {
+					fmt.Printf("  %s Could not verify unhook of %s: %v\n", style.Dim.Render("Warning:"), beadID, verifyErr)
+				} else if observed.Status != status || observed.Assignee != "" {
+					fmt.Printf("  %s Rollback incomplete for %s: status=%s assignee=%s\n", style.Dim.Render("Warning:"), beadID, observed.Status, observed.Assignee)
+				} else {
+					fmt.Printf("  %s Verified unhook of bead %s\n", style.Dim.Render("○"), beadID)
+				}
 			}
 		}
 	}
 
 	// 3. Clean up the spawned polecat (worktree, agent bead, convoy, etc.)
 	cleanupSpawnedPolecat(spawnInfo, spawnInfo.RigName, convoyID)
+}
+
+// rollbackUnhookStatus preserves operator pauses and refuses to clear another
+// assignee or reopen completed work during cleanup of a failed launch.
+func rollbackUnhookStatus(info *beadInfo, assignee string) (string, bool) {
+	if info == nil || (info.Assignee != "" && info.Assignee != assignee) {
+		return "", false
+	}
+	switch info.Status {
+	case "blocked", "deferred":
+		return info.Status, true
+	case "open", "hooked", "in_progress", "":
+		return "open", true
+	default:
+		return "", false
+	}
 }

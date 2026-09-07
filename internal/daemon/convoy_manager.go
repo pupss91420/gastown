@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 const (
@@ -541,6 +542,11 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	}
 
 	for _, issueID := range c.ReadyIssues {
+		if witness.ShouldBlockRespawn(m.townRoot, issueID) {
+			m.logger("Convoy %s: %s requires intervention: respawn circuit open", c.ID, issueID)
+			continue
+		}
+
 		prefix := beads.ExtractPrefix(issueID)
 		if prefix == "" {
 			m.logger("Convoy %s: no prefix for %s, skipping", c.ID, issueID)
