@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -144,5 +145,37 @@ func TestStaleQuietExitCode(t *testing.T) {
 				t.Errorf("staleQuietExitCode() = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStaleRepositoryEvidence(t *testing.T) {
+	output := StaleOutput{
+		RepoRoot:      "/town/gastown/.repo.git",
+		RepoCommonDir: "/town/gastown/.repo.git",
+		RemoteURL:     "https://example.test/fork/gastown",
+		ResolvedRef:   "refs/heads/main",
+		CompareRef:    "main",
+	}
+	text := captureStdout(t, func() {
+		if err := outputStaleText(output); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, want := range []string{"Source repo: " + output.RepoRoot, "Git common dir: " + output.RepoCommonDir, "Ref remote: " + output.RemoteURL, "Resolved ref: " + output.ResolvedRef} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text missing %q: %s", want, text)
+		}
+	}
+	encoded := captureStdout(t, func() {
+		if err := outputStaleJSON(output); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var decoded StaleOutput
+	if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != output {
+		t.Fatalf("JSON lost repository evidence: %+v", decoded)
 	}
 }

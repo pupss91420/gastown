@@ -3,7 +3,6 @@ package version
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime/debug"
 	"strings"
@@ -20,6 +19,10 @@ var (
 
 // StaleBinaryInfo contains information about binary staleness.
 type StaleBinaryInfo struct {
+	RepoRoot      string // Selected source repository (may be bare)
+	RepoCommonDir string // Git common directory identifying the clone
+	RemoteURL     string // Remote associated with the comparison ref, if configured
+	ResolvedRef   string // Fully qualified comparison ref
 	IsStale       bool   // True if binary commit is behind the build-branch ref
 	IsForward     bool   // True if the compare commit is a descendant of binary commit (safe to rebuild)
 	OnMainBranch  bool   // True if the resolved source worktree is on a build branch
@@ -101,7 +104,7 @@ func commitsMatch(a, b string) bool {
 // This check is designed to be fast and non-blocking - errors are captured but
 // don't interrupt normal operation.
 func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
-	info := &StaleBinaryInfo{}
+	info := &StaleBinaryInfo{RepoRoot: repoDir}
 
 	// Get binary commit
 	info.BinaryCommit = resolveCommitHash()
@@ -110,9 +113,10 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 		return info
 	}
 	if !isGitRepo(repoDir) {
-		info.Error = fmt.Errorf("source repo %q is not a git worktree", repoDir)
+		info.Error = fmt.Errorf("source repo %q is not a git repository", repoDir)
 		return info
 	}
+	info.RepoCommonDir, _ = gitOutput(repoDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	binaryCommit, err := resolveGitCommit(repoDir, info.BinaryCommit)
 	if err != nil {
 		info.Skipped = true
@@ -129,36 +133,42 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 	if branchOutput, err := branchCmd.Output(); err == nil {
 		branch = strings.TrimSpace(string(branchOutput))
 	}
-	info.OnMainBranch = isBuildBranch(branch)
+	inside, _ := gitOutput(repoDir, "rev-parse", "--is-inside-work-tree")
+	info.OnMainBranch = isBuildBranch(branch) && inside == "true"
 
-	// Decide which ref to compare the binary against.
-	//
-	// GetRepoRoot resolves to $GT_ROOT/gastown/mayor/rig, a worktree that
-	// normally sits on a feature branch (that's where the Mayor does git work).
-	// Diffing the binary against that worktree's HEAD compares it to unmerged
-	// feature work and produces a false "N commits behind" warning advising a
-	// rebuild from the feature branch (GH#4034). Staleness is only meaningful
-	// relative to a *build branch*.
+	// An embedded build ref remains authoritative even if the build worktree
+	// has since switched branches or has been removed.
 	var compareCommit string
-	if info.OnMainBranch {
-		// Already on a build branch — its HEAD is the build branch.
-		info.CompareRef = branch
-		compareCommit, err = resolveGitCommit(repoDir, "HEAD")
+	if strings.HasPrefix(SourceRef, "refs/heads/") && isBuildBranch(strings.TrimPrefix(SourceRef, "refs/heads/")) {
+		info.ResolvedRef = SourceRef
+		info.CompareRef = strings.TrimPrefix(SourceRef, "refs/heads/")
+		compareCommit, err = resolveGitCommit(repoDir, SourceRef)
+		info.OnMainBranch = info.OnMainBranch && branch == info.CompareRef
 		if err != nil {
-			info.Error = fmt.Errorf("cannot resolve build branch HEAD: %w", err)
+			info.Skipped = true
+			info.SkipReason = "recorded build ref is unavailable in source repository"
+			return info
+		}
+	} else if isBuildBranch(branch) {
+		info.CompareRef = branch
+		info.ResolvedRef = "refs/heads/" + branch
+		compareCommit, err = resolveGitCommit(repoDir, info.ResolvedRef)
+		if err != nil {
+			info.Error = fmt.Errorf("cannot resolve build branch: %w", err)
 			return info
 		}
 	} else {
-		// Resolve a real build-branch ref instead of the feature HEAD.
 		ref, ok := resolveBuildBranchRef(repoDir, binaryCommit)
 		if !ok {
 			info.Skipped = true
-			info.SkipReason = "source worktree not on a build branch and no build-branch ref found to compare against"
+			info.SkipReason = "no unambiguous build-branch lineage found to compare against"
 			return info
 		}
 		info.CompareRef = ref.display
+		info.ResolvedRef = ref.ref
 		compareCommit = ref.commit
 	}
+	info.RemoteURL = refRemoteURL(repoDir, info.ResolvedRef)
 	info.RepoCommit = compareCommit
 
 	// Compare commits using prefix matching (handles short vs full hash)
@@ -201,7 +211,7 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 //
 // Candidate refs are fully qualified to avoid branch/tag shadowing. Among refs
 // that contain the binary commit, choose the freshest descendant; only use the
-// candidate order below to break truly diverged ties.
+// candidate order below to break equivalent ties. Diverged tips are ambiguous.
 func resolveBuildBranchRef(repoDir, binaryCommit string) (buildBranchRef, bool) {
 	var usable []buildBranchRef
 	for _, candidate := range buildBranchCandidates(repoDir) {
@@ -232,10 +242,33 @@ func resolveBuildBranchRef(repoDir, binaryCommit string) (buildBranchRef, bool) 
 			frontier = append(frontier, candidate)
 		}
 	}
+	for _, candidate := range frontier[1:] {
+		if candidate.commit != frontier[0].commit {
+			return buildBranchRef{}, false
+		}
+	}
 	return frontier[0], true
 }
 
 func buildBranchCandidates(repoDir string) []buildBranchRef {
+	// A local build branch's tracking configuration identifies its remote,
+	// including custom remote names. Do not mix unrelated upstream/fork refs
+	// into this comparison just because both descend from an old binary.
+	var tracked []buildBranchRef
+	out, _ := gitOutput(repoDir, "for-each-ref", "--format=%(refname) %(upstream)", "refs/heads/")
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !isBuildBranch(strings.TrimPrefix(fields[0], "refs/heads/")) {
+			continue
+		}
+		tracked = append(tracked,
+			buildBranchRef{ref: fields[0], display: strings.TrimPrefix(fields[0], "refs/heads/")},
+			buildBranchRef{ref: fields[1], display: strings.TrimPrefix(fields[1], "refs/remotes/")})
+	}
+	if len(tracked) > 0 {
+		return tracked
+	}
+
 	candidates := make([]buildBranchRef, 0, 10)
 	for _, pattern := range []string{
 		"refs/heads/carry/",
@@ -296,71 +329,6 @@ func singleBranchRef(repoDir, pattern string) (buildBranchRef, bool) {
 	return buildBranchRef{ref: refs[0], display: display}, true
 }
 
-// GetRepoRoot returns the git repository root for the gt source code.
-// The canonical source is the gastown repo itself ($GT_ROOT/gastown).
-// Crew rigs also contain cmd/gt/main.go but have different HEADs,
-// so we prefer the gastown repo over CWD-based git toplevel detection.
-func GetRepoRoot() (string, error) {
-	// Check if GT_ROOT environment variable is set (agents always have this)
-	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		candidates := []string{
-			gtRoot + "/gastown",
-			gtRoot + "/gastown/mayor/rig",
-		}
-		for _, candidate := range candidates {
-			if hasGtSource(candidate) {
-				return candidate, nil
-			}
-		}
-	}
-
-	// Try common development paths relative to home
-	home := os.Getenv("HOME")
-	if home != "" {
-		candidates := []string{
-			home + "/gt/gastown",
-			home + "/gt/gastown/mayor/rig",
-			home + "/gastown",
-			home + "/gastown/mayor/rig",
-			home + "/src/gastown",
-			home + "/src/gastown/mayor/rig",
-		}
-		for _, candidate := range candidates {
-			if hasGtSource(candidate) {
-				return candidate, nil
-			}
-		}
-	}
-
-	// Fall back to current directory's git repo (may be a crew rig)
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	util.SetDetachedProcessGroup(cmd)
-	if output, err := cmd.Output(); err == nil {
-		root := strings.TrimSpace(string(output))
-		if hasGtSource(root) {
-			return root, nil
-		}
-	}
-
-	return "", fmt.Errorf("cannot locate gt source repository")
-}
-
-// isGitRepo checks if a directory is a git repository.
-func isGitRepo(dir string) bool {
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = dir
-	util.SetDetachedProcessGroup(cmd)
-	output, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(output)) == "true"
-}
-
-// hasGtSource checks if a directory contains the gt source code.
-// We look for cmd/gt/main.go as the definitive marker.
-func hasGtSource(dir string) bool {
-	_, err := os.Stat(dir + "/cmd/gt/main.go")
-	return err == nil
-}
-
 // onlyBeadsChanges checks whether all commits between binaryCommit and
 // compareRef exclusively modify files under .beads/. Returns true if the diff
 // contains no changes outside .beads/, meaning the binary is functionally
@@ -369,7 +337,7 @@ func hasGtSource(dir string) bool {
 func onlyBeadsChanges(repoDir, binaryCommit, compareRef string) bool {
 	// Get files changed between binary commit and the build ref, excluding
 	// .beads/. If this produces no output, all changes are within .beads/
-	cmd := exec.Command("git", "diff", "--name-only", binaryCommit+".."+compareRef, "--", ".", ":!.beads")
+	cmd := exec.Command("git", "diff", "--name-only", binaryCommit+".."+compareRef, "--", ":(top)**", ":(top,exclude).beads/**")
 	cmd.Dir = repoDir
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.Output()

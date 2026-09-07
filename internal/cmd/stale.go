@@ -42,6 +42,10 @@ func init() {
 
 // StaleOutput represents the JSON output structure.
 type StaleOutput struct {
+	RepoRoot      string `json:"repo_root,omitempty"`
+	RepoCommonDir string `json:"repo_common_dir,omitempty"`
+	RemoteURL     string `json:"remote_url,omitempty"`
+	ResolvedRef   string `json:"resolved_ref,omitempty"`
 	Stale         bool   `json:"stale"`
 	Forward       bool   `json:"forward"`
 	OnMainBranch  bool   `json:"on_main_branch"`
@@ -91,6 +95,10 @@ func runStale(cmd *cobra.Command, args []string) error {
 	// SafeToRebuild requires: stale + forward-only + on a build branch.
 	safeToRebuild := info.IsStale && info.IsForward && info.OnMainBranch
 	output := StaleOutput{
+		RepoRoot:      info.RepoRoot,
+		RepoCommonDir: info.RepoCommonDir,
+		RemoteURL:     info.RemoteURL,
+		ResolvedRef:   info.ResolvedRef,
 		Stale:         info.IsStale,
 		Forward:       info.IsForward,
 		OnMainBranch:  info.OnMainBranch,
@@ -127,6 +135,19 @@ func outputStaleJSON(output StaleOutput) error {
 }
 
 func outputStaleText(output StaleOutput) error {
+	if output.RepoRoot != "" {
+		fmt.Printf("  Source repo: %s\n", output.RepoRoot)
+	}
+	if output.RepoCommonDir != "" {
+		fmt.Printf("  Git common dir: %s\n", output.RepoCommonDir)
+	}
+	if output.ResolvedRef != "" {
+		fmt.Printf("  Resolved ref: %s\n", output.ResolvedRef)
+	}
+	if output.RemoteURL != "" {
+		fmt.Printf("  Ref remote: %s\n", output.RemoteURL)
+	}
+
 	if output.Skipped {
 		fmt.Printf("%s Binary staleness check skipped\n", style.Dim.Render("•"))
 		fmt.Printf("  %s\n", output.SkipReason)

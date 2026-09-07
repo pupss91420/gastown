@@ -377,7 +377,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		}
 	})
 
-	t.Run("prefers upstream over divergent origin", func(t *testing.T) {
+	t.Run("skips divergent remotes without build provenance", func(t *testing.T) {
 		dir := newGitRepo(t)
 		base := gitCommit(t, dir, "a.go", "1")
 		gitRun(t, dir, "branch", "-M", "main")
@@ -392,8 +392,8 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
 
 		ref, ok := resolveBuildBranchRef(dir, base)
-		if !ok || ref.display != "upstream/main" || ref.commit != upstreamTip {
-			t.Errorf("got (%+v,%v), want upstream/main at %s", ref, ok, upstreamTip)
+		if ok {
+			t.Errorf("got (%+v,%v), want ambiguous remote lineage skipped", ref, ok)
 		}
 	})
 

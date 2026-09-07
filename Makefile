@@ -13,9 +13,13 @@ E2E_RUN_RETRIES ?= 1
 # Get version info for ldflags
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+SOURCE_REPO := $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+SOURCE_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -s -w \
+           -X 'github.com/steveyegge/gastown/internal/version.SourceRepo=$(SOURCE_REPO)' \
+           -X 'github.com/steveyegge/gastown/internal/version.SourceRef=$(SOURCE_REF)' \
            -X github.com/steveyegge/gastown/internal/cmd.Version=$(VERSION) \
            -X github.com/steveyegge/gastown/internal/cmd.Commit=$(COMMIT) \
            -X github.com/steveyegge/gastown/internal/cmd.BuildTime=$(BUILD_TIME) \
