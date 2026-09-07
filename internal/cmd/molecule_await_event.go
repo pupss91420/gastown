@@ -13,11 +13,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
 	awaitEventChannel              string
+	awaitEventRig                  string
 	awaitEventTimeout              string
 	awaitEventBackoffBase          string
 	awaitEventBackoffMult          int
@@ -40,7 +40,12 @@ Unlike await-signal (which subscribes to the generic beads activity feed),
 await-event watches a dedicated event channel directory for .event files.
 Events are emitted via "gt mol step emit-event" or programmatically.
 
-Channels are single-consumer: only one process should watch a given channel
+Refinery and witness channels use events/<channel>/<rig>/; use --rig or run
+from the recipient rig. Legacy flat events with matching payload.rig are migrated
+once; ambiguous or malformed files remain untouched. Mayor and custom
+channels remain town-wide.
+
+Channels are single-consumer within that scope: only one process should watch a given channel
 at a time. If multiple consumers watch the same channel with --cleanup,
 events may be deleted before all consumers read them.
 
@@ -111,6 +116,7 @@ type EventFile struct {
 }
 
 func init() {
+	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventRig, "rig", "", "Recipient rig (defaults to current rig; required for refinery/witness)")
 	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventChannel, "channel", "",
 		"Event channel name (required, e.g., 'refinery')")
 	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventTimeout, "timeout", "60s",
@@ -142,14 +148,18 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", awaitEventChannel)
 	}
 
-	// Resolve event directory
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
-		// Fallback to ~/gt
-		home, _ := os.UserHomeDir()
-		townRoot = filepath.Join(home, "gt")
+	// Resolve the same recipient scope used by emit-event and internal producers.
+	townRoot, rigName, err := resolveEventScope(awaitEventChannel, awaitEventRig)
+	if err != nil {
+		return err
 	}
-	eventDir := filepath.Join(townRoot, "events", awaitEventChannel)
+	eventDir, err := channelevents.Directory(townRoot, awaitEventChannel, rigName)
+	if err != nil {
+		return err
+	}
+	if err := channelevents.MigrateLegacyToRig(townRoot, awaitEventChannel, rigName); err != nil {
+		return fmt.Errorf("migrating legacy events: %w", err)
+	}
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		return fmt.Errorf("creating event directory: %w", err)
 	}

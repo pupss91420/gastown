@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -345,6 +346,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	}
 	if running {
 		if m.tmux.IsAgentAlive(sessionID) {
+			session.StartAgentNudgePoller(filepath.Dir(m.rig.Path), sessionID)
 			return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
 		}
 		if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
@@ -617,6 +619,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 			sessionID, runtimeConfig.Command)
 	}
 
+	// Polecats use a separate startup path from session.StartSession.
+	session.StartAgentNudgePoller(townRoot, sessionID)
+
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
 	_ = session.TrackSessionPID(townRoot, sessionID, m.tmux)
 
@@ -650,6 +655,7 @@ func (m *SessionManager) isSessionStale(sessionID string) bool {
 // Stop terminates a polecat session.
 func (m *SessionManager) Stop(polecat string, force bool) error {
 	sessionID := m.SessionName(polecat)
+	_ = nudge.StopPoller(filepath.Dir(m.rig.Path), sessionID)
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {

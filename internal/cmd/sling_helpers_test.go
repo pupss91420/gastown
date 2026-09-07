@@ -108,6 +108,8 @@ func TestWakeRigAgentsDoesNotNudgeRefinery(t *testing.T) {
 // or error when called without the test log env var and without a real tmux session.
 // The tmux NudgeSession call should fail silently.
 func TestNudgeRefineryNoOpWithoutLog(t *testing.T) {
+	// Do not resolve the checkout to its enclosing live town.
+	t.Chdir(t.TempDir())
 	// Ensure test log is NOT set so we exercise the real tmux path
 	t.Setenv("GT_TEST_NUDGE_LOG", "")
 

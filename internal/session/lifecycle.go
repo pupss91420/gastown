@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -325,6 +326,10 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		}
 	}
 
+	// Every tmux harness needs an idle drain, including Claude while no turn
+	// hook is firing. ACP has its own Propeller and never uses StartSession.
+	StartAgentNudgePoller(cfg.TownRoot, cfg.SessionID)
+
 	// Record the agent instantiation event (GASTA root span).
 	// Done after session creation so we only emit on success.
 	RecordAgentInstantiateFromDir(ctx, runID, runtimeConfig.ResolvedAgent,
@@ -491,4 +496,28 @@ func buildCommand(cfg SessionConfig, prompt string) (string, error) {
 // Some roles use this instead of the runtime's ready delay.
 func ShutdownDelay() time.Duration {
 	return constants.ShutdownNotifyDelay
+}
+
+// startNudgePoller is replaceable in lifecycle tests to avoid detached processes.
+var startNudgePoller = nudge.StartPoller
+
+// EnsureNudgePoller gives every tmux role a drain independent of harness-specific
+// settings files. StartPoller is idempotent; hooks and pollers share atomic Drain.
+func EnsureNudgePoller(townRoot, sessionID string) error {
+	if townRoot == "" {
+		return fmt.Errorf("cannot start nudge poller without town root")
+	}
+	if _, err := startNudgePoller(townRoot, sessionID); err != nil {
+		return fmt.Errorf("could not start nudge poller for %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// StartAgentNudgePoller runs only after agent creation. A delivery-side failure
+// must not report spawn failure while the live agent still owns its assignment.
+// Queued sends use EnsureNudgePoller directly and return the delivery error.
+func StartAgentNudgePoller(townRoot, sessionID string) {
+	if err := EnsureNudgePoller(townRoot, sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: agent %s is running, but queued delivery is unavailable: %v\n", sessionID, err)
+	}
 }

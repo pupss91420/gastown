@@ -160,7 +160,7 @@ func TestEnsureRefineryRunningSafetyStoppedDoesNotSpawn(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDaemonTownFile(t, townRoot, "mayor/town.json", `{"name":"test"}`)
 	writeDaemonTownFile(t, townRoot, ".beads/metadata.json", `{"prefix":"hq"}`)
-	writeDaemonTownFile(t, townRoot, "events/refinery/pending.event", "{}")
+	writeDaemonTownFile(t, townRoot, "events/refinery/testrig/pending.event", "{}")
 	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestEnsureRefineryRunningForkRigDoesNotSpawn(t *testing.T) {
 		t.Skip("mock tmux script uses POSIX shell")
 	}
 	townRoot := t.TempDir()
-	writeDaemonTownFile(t, townRoot, "events/refinery/pending.event", "{}")
+	writeDaemonTownFile(t, townRoot, "events/refinery/testrig/pending.event", "{}")
 	writeDaemonTownFile(t, townRoot, "testrig/config.json", `{"upstream_url":"https://github.com/upstream/repo","beads":{"prefix":"gt"}}`)
 
 	binDir := t.TempDir()
@@ -821,14 +821,14 @@ func TestIsRunningFromPID_LiveProcess(t *testing.T) {
 
 func TestHasPendingEvents_EmptyDir(t *testing.T) {
 	tmpDir := t.TempDir()
-	eventDir := filepath.Join(tmpDir, "events", "refinery")
+	eventDir := filepath.Join(tmpDir, "events", "refinery", "testrig")
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	d := &Daemon{config: &Config{TownRoot: tmpDir}}
 
-	if d.hasPendingEvents("refinery") {
+	if d.hasPendingEvents("refinery", "testrig") {
 		t.Error("expected false for empty event directory")
 	}
 }
@@ -838,14 +838,14 @@ func TestHasPendingEvents_MissingDir(t *testing.T) {
 
 	d := &Daemon{config: &Config{TownRoot: tmpDir}}
 
-	if d.hasPendingEvents("refinery") {
+	if d.hasPendingEvents("refinery", "testrig") {
 		t.Error("expected false when event directory doesn't exist")
 	}
 }
 
 func TestHasPendingEvents_WithEventFiles(t *testing.T) {
 	tmpDir := t.TempDir()
-	eventDir := filepath.Join(tmpDir, "events", "refinery")
+	eventDir := filepath.Join(tmpDir, "events", "refinery", "testrig")
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -858,14 +858,14 @@ func TestHasPendingEvents_WithEventFiles(t *testing.T) {
 
 	d := &Daemon{config: &Config{TownRoot: tmpDir}}
 
-	if !d.hasPendingEvents("refinery") {
+	if !d.hasPendingEvents("refinery", "testrig") {
 		t.Error("expected true when .event files exist")
 	}
 }
 
 func TestHasPendingEvents_IgnoresNonEventFiles(t *testing.T) {
 	tmpDir := t.TempDir()
-	eventDir := filepath.Join(tmpDir, "events", "refinery")
+	eventDir := filepath.Join(tmpDir, "events", "refinery", "testrig")
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -877,7 +877,7 @@ func TestHasPendingEvents_IgnoresNonEventFiles(t *testing.T) {
 
 	d := &Daemon{config: &Config{TownRoot: tmpDir}}
 
-	if d.hasPendingEvents("refinery") {
+	if d.hasPendingEvents("refinery", "testrig") {
 		t.Error("expected false when only non-.event files exist")
 	}
 }
@@ -985,4 +985,38 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 		t.Error("isRigOperational should return false when rig bead is missing")
 	}
 	t.Logf("Docked rig check returned: operational=%v, reason=%q", operational, reason)
+}
+
+func TestHasPendingEvents_RigIsolation(t *testing.T) {
+	townRoot := t.TempDir()
+	writeDaemonTownFile(t, townRoot, "events/refinery/alpha/pending.event", "{}")
+	writeDaemonTownFile(t, townRoot, "events/refinery/legacy.event", "{}")
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	if !d.hasPendingEvents("refinery", "alpha") {
+		t.Fatal("own rig event did not open spawn gate")
+	}
+	if d.hasPendingEvents("refinery", "beta") {
+		t.Fatal("other rig or legacy event opened spawn gate")
+	}
+	if d.hasPendingEvents("refinery", "") {
+		t.Fatal("missing rig opened spawn gate")
+	}
+}
+
+func TestHasPendingEvents_MigratesAttributableLegacy(t *testing.T) {
+	root := t.TempDir()
+	writeDaemonTownFile(t, root, "events/refinery/old.event", `{"channel":"refinery","type":"MQ_SUBMIT","payload":{"rig":"alpha"}}`)
+	d := &Daemon{config: &Config{TownRoot: root}}
+	if d.hasPendingEvents("refinery", "beta") {
+		t.Fatal("other rig opened event gate")
+	}
+	if _, err := os.Stat(filepath.Join(root, "events/refinery/old.event")); err != nil {
+		t.Fatal("other rig stole legacy event")
+	}
+	if !d.hasPendingEvents("refinery", "alpha") {
+		t.Fatal("attributable legacy event stranded")
+	}
+	if _, err := os.Stat(filepath.Join(root, "events/refinery/alpha/legacy-old.event")); err != nil {
+		t.Fatal("legacy event not routed")
+	}
 }

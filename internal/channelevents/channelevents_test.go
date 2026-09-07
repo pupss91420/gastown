@@ -113,3 +113,37 @@ func TestEmitToTown_CreatesDirectory(t *testing.T) {
 		t.Errorf("channel dir should exist after emit: %v", err)
 	}
 }
+
+func TestRigScopedDirectory(t *testing.T) {
+	root := t.TempDir()
+	for _, channel := range []string{"refinery", "witness"} {
+		for _, rig := range []string{"", "../beta", "alpha/beta", "."} {
+			if _, err := Directory(root, channel, rig); err == nil {
+				t.Fatalf("accepted %q rig for %s", rig, channel)
+			}
+		}
+		path, err := EmitToRig(root, "alpha", channel, "TEST", []string{"rig=beta"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Dir(path) != filepath.Join(root, "events", channel, "alpha") {
+			t.Fatalf("wrong path %s", path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), `"rig": "alpha"`) {
+			t.Fatalf("payload recipient disagrees: %s", data)
+		}
+	}
+	for _, channel := range []string{"mayor", "custom"} {
+		dir, err := Directory(root, channel, "alpha")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dir != filepath.Join(root, "events", channel) {
+			t.Fatalf("town channel moved: %s", dir)
+		}
+	}
+}

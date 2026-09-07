@@ -1,6 +1,11 @@
 package session
 
 import (
+	"errors"
+	"github.com/steveyegge/gastown/internal/tmux"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -206,4 +211,75 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// A stale Claude hook file must not suppress Codex's real startup drain.
+func TestStartSessionCodexRegistersNudgePoller(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX tmux stub")
+	}
+	root := t.TempDir()
+	work := filepath.Join(root, "mayor")
+	if err := os.MkdirAll(filepath.Join(work, ".claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, ".claude", "settings.json"), []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"gt nudge drain"}]}]}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(root)
+	original := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = original })
+	calls := 0
+	startNudgePoller = func(townRoot, sessionID string) (int, error) {
+		calls++
+		if townRoot != root || sessionID != "hq-mayor" {
+			t.Fatalf("wrong poller target %q %q", townRoot, sessionID)
+		}
+		return 123, nil
+	}
+	result, err := StartSession(tmux.NewTmux(), SessionConfig{
+		SessionID: "hq-mayor", WorkDir: work, TownRoot: root, Role: "mayor",
+		AgentOverride: "codex", Command: "sleep 30",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RuntimeConfig.ResolvedAgent != "codex" {
+		t.Fatalf("resolved agent: %s", result.RuntimeConfig.ResolvedAgent)
+	}
+	if calls != 1 {
+		t.Fatalf("poller registrations=%d, want 1", calls)
+	}
+	// A failed session creation must not launch a poller for a nonexistent target.
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = StartSession(tmux.NewTmux(), SessionConfig{
+		SessionID: "hq-mayor", WorkDir: work, TownRoot: root, Role: "mayor",
+		AgentOverride: "codex", Command: "sleep 30",
+	})
+	if err == nil {
+		t.Fatal("expected failed session creation")
+	}
+	if calls != 1 {
+		t.Fatal("failed startup registered poller")
+	}
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pollerErr := errors.New("poller launch failed")
+	startNudgePoller = func(string, string) (int, error) { return 0, pollerErr }
+	_, err = StartSession(tmux.NewTmux(), SessionConfig{
+		SessionID: "hq-mayor", WorkDir: work, TownRoot: root, Role: "mayor",
+		AgentOverride: "codex", Command: "sleep 30",
+	})
+	if err != nil {
+		t.Fatalf("live mayor reported spawn failure after poller error: %v", err)
+	}
 }

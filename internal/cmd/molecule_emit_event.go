@@ -11,6 +11,7 @@ import (
 
 var (
 	emitEventChannel string
+	emitEventRig     string
 	emitEventType    string
 	emitEventPayload []string
 )
@@ -22,6 +23,10 @@ var moleculeEmitEventCmd = &cobra.Command{
 
 This is the Go counterpart to emit-event.sh. Events are JSON files consumed
 by await-event subscribers (e.g., the refinery watching for MERGE_READY events).
+
+Refinery and witness channels are scoped to the recipient rig:
+events/<channel>/<rig>/. Use --rig when emitting from outside that rig.
+Mayor and custom channels remain town-wide.
 
 EVENT FORMAT:
 Creates a JSON file at ~/gt/events/<channel>/<timestamp>.event:
@@ -50,6 +55,7 @@ type EmitEventResult struct {
 }
 
 func init() {
+	moleculeEmitEventCmd.Flags().StringVar(&emitEventRig, "rig", "", "Recipient rig (defaults to current rig; required for refinery/witness)")
 	moleculeEmitEventCmd.Flags().StringVar(&emitEventChannel, "channel", "",
 		"Event channel name (required, e.g., 'refinery')")
 	moleculeEmitEventCmd.Flags().StringVar(&emitEventType, "type", "",
@@ -65,7 +71,11 @@ func init() {
 }
 
 func runMoleculeEmitEvent(cmd *cobra.Command, args []string) error {
-	path, err := channelevents.Emit(emitEventChannel, emitEventType, emitEventPayload)
+	townRoot, rigName, err := resolveEventScope(emitEventChannel, emitEventRig)
+	if err != nil {
+		return err
+	}
+	path, err := channelevents.EmitToRig(townRoot, rigName, emitEventChannel, emitEventType, emitEventPayload)
 	if err != nil {
 		return err
 	}

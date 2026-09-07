@@ -189,11 +189,19 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 		if townRoot == "" {
 			return fmt.Errorf("--mode=queue requires a Gas Town workspace")
 		}
-		return nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
-			Sender:   sender,
-			Message:  message,
-			Priority: nudgePriorityFlag,
-		})
+		if err := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
+			Sender: sender, Message: message, Priority: nudgePriorityFlag,
+		}); err != nil {
+			return err
+		}
+		// Explicit queue mode also needs a consumer, even when the agent has
+		// prompt detection (Codex) or an idle turn hook (Claude). ACP uses Propeller.
+		if !hasACPSessionByName(townRoot, sessionName) {
+			if err := session.EnsureNudgePoller(townRoot, sessionName); err != nil {
+				return fmt.Errorf("nudge durably queued, but drain unavailable: %w", err)
+			}
+		}
+		return nil
 
 	case NudgeModeWaitIdle:
 		if townRoot == "" {
@@ -228,8 +236,8 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 				// session was started manually (or the poller crashed), queued
 				// nudges sit undelivered forever. StartPoller is idempotent —
 				// it no-ops if a poller is already alive for this session.
-				if _, pollerErr := nudge.StartPoller(townRoot, sessionName); pollerErr != nil {
-					fmt.Fprintf(os.Stderr, "wait-idle: could not start nudge poller for %s: %v\n", sessionName, pollerErr)
+				if err := session.EnsureNudgePoller(townRoot, sessionName); err != nil {
+					return fmt.Errorf("nudge durably queued, but drain unavailable: %w", err)
 				}
 				return nil
 			}
@@ -257,6 +265,9 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			}); qErr != nil {
 				return fmt.Errorf("queue fallback after unverified submit failed: %v (original: %w)", qErr, deliverErr)
 			}
+			if err := session.EnsureNudgePoller(townRoot, sessionName); err != nil {
+				return fmt.Errorf("nudge durably queued, but drain unavailable: %w", err)
+			}
 			return nil
 		}
 		// Terminal errors (session gone, no server) — propagate, don't queue.
@@ -281,6 +292,9 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 				Priority: nudgePriorityFlag,
 			}})
 			return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+		}
+		if err := session.EnsureNudgePoller(townRoot, sessionName); err != nil {
+			return fmt.Errorf("nudge durably queued, but drain unavailable: %w", err)
 		}
 		// Run watcher synchronously: polls for idle over a longer window.
 		// The UserPromptSubmit hook drains the queue on agent input, but an

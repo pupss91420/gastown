@@ -13,6 +13,10 @@
 package nudge
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +29,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -48,118 +53,212 @@ func pollerPidFile(townRoot, session string) string {
 	return filepath.Join(pollerPidDir(townRoot), safe+".pid")
 }
 
-// StartPoller launches a background `gt nudge-poller <session>` process.
-// The process is detached (Setpgid) so it survives the caller's exit.
-// Returns the PID of the launched process, or an error.
+// pollerRecord binds a process to one launch, session and readiness handshake.
+// A bare PID is insufficient: the OS may reuse it for an unrelated process.
+type pollerRecord struct {
+	PID     int    `json:"pid"`
+	Session string `json:"session"`
+	Token   string `json:"token"`
+}
+
+var pollerExecutable = os.Executable
+
+func readPollerRecord(path string) (pollerRecord, error) {
+	var r pollerRecord
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return r, err
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return r, err
+	}
+	token, err := hex.DecodeString(r.Token)
+	if err != nil || len(token) != 16 || r.PID <= 0 || r.Session == "" {
+		return r, fmt.Errorf("invalid poller ownership record")
+	}
+	return r, nil
+}
+
+func writePollerRecord(path string, r pollerRecord) error {
+	data, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".poller-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temp.Name())
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temp.Name(), path)
+}
+
+// StartPoller starts (or reuses) an owned, ready nudge-poller. A successful
+// exec alone is not readiness: the child must verify its target and acknowledge
+// this launch token. Concurrent starters serialize before inspecting ownership.
 func StartPoller(townRoot, session string) (int, error) {
 	pidDir := pollerPidDir(townRoot)
 	if err := os.MkdirAll(pidDir, 0755); err != nil {
 		return 0, fmt.Errorf("creating poller pid dir: %w", err)
 	}
-
-	// Check if a poller is already running for this session.
-	if pid, alive := pollerAlive(townRoot, session); alive {
-		return pid, nil // already running
+	pidPath := pollerPidFile(townRoot, session)
+	unlock, err := lock.FlockAcquire(pidPath + ".lock")
+	if err != nil {
+		return 0, err
 	}
-
-	// Find the gt binary.
-	gtBin, err := os.Executable()
+	defer unlock()
+	if pid, alive := pollerAlive(townRoot, session); alive {
+		return pid, nil
+	}
+	// Never kill a process named only by stale/unverified state. A fresh launch
+	// replaces that state only after obtaining a new unpredictable token.
+	gtBin, err := pollerExecutable()
 	if err != nil {
 		return 0, fmt.Errorf("finding gt binary: %w", err)
 	}
-
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return 0, err
+	}
+	token := hex.EncodeToString(tokenBytes)
 	cmd := buildPollerCommand(gtBin, townRoot, session)
-
+	cmd.Args = append(cmd.Args, "--owner-token", token)
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("starting nudge-poller: %w", err)
 	}
-
-	pid := cmd.Process.Pid
-
-	// Write PID file for later cleanup.
-	pidPath := pollerPidFile(townRoot, session)
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
-		// Non-fatal — the process is running, we just can't track it.
-		fmt.Fprintf(os.Stderr, "Warning: failed to write poller PID file: %v\n", err)
+	r := pollerRecord{PID: cmd.Process.Pid, Session: session, Token: token}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	cleanupFailed := func() {
+		// This handle belongs to the child we just spawned, never to a PID file.
+		_ = cmd.Process.Kill()
+		removePollerRecord(pidPath, r)
+		removePollerRecord(pidPath+".ready", r)
 	}
-
-	// Release the process so it runs independently.
-	_ = cmd.Process.Release()
-
-	return pid, nil
+	if err := writePollerRecord(pidPath, r); err != nil {
+		cleanupFailed()
+		return 0, err
+	}
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-exited:
+			cleanupFailed()
+			return 0, fmt.Errorf("nudge-poller exited before readiness: %v", err)
+		case <-timeout.C:
+			cleanupFailed()
+			return 0, fmt.Errorf("nudge-poller readiness timed out for %s", session)
+		case <-ticker.C:
+			if pid, alive := pollerAlive(townRoot, session); alive && pid == r.PID {
+				return pid, nil
+			}
+		}
+	}
 }
 
 func buildPollerCommand(gtBin, townRoot, session string) *exec.Cmd {
 	cmd := exec.Command(gtBin, "nudge-poller", session)
 	cmd.Dir = townRoot
-	cmd.Stdout = nil // discard
-	cmd.Stderr = nil // discard
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	util.SetDetachedProcessGroup(cmd)
 	return cmd
 }
 
-// StopPoller terminates the nudge-poller for a session, if running.
+// MarkPollerReady is called by the child only after target/session validation.
+// Empty token supports manually invoked diagnostic pollers without claiming an
+// automatically managed process. The returned cleanup removes only this token.
+func MarkPollerReady(townRoot, session, token string) (func(), error) {
+	if token == "" {
+		return func() {}, nil
+	}
+	decoded, err := hex.DecodeString(token)
+	if err != nil || len(decoded) != 16 {
+		return nil, fmt.Errorf("invalid poller owner token")
+	}
+	r := pollerRecord{PID: os.Getpid(), Session: session, Token: token}
+	path := pollerPidFile(townRoot, session)
+	if err := writePollerRecord(path+".ready", r); err != nil {
+		return nil, err
+	}
+	return func() { removePollerRecord(path+".ready", r); removePollerRecord(path, r) }, nil
+}
+
+func removePollerRecord(path string, r pollerRecord) {
+	if current, err := readPollerRecord(path); err == nil && current == r {
+		_ = os.Remove(path)
+	}
+}
+
+// StopPoller refuses to signal unverified live PIDs, including legacy bare PID
+// files. Identity is checked again immediately before signaling the owned child.
 func StopPoller(townRoot, session string) error {
-	pidPath := pollerPidFile(townRoot, session)
-
-	data, err := os.ReadFile(pidPath)
+	path := pollerPidFile(townRoot, session)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // no poller to stop
+		return err
+	}
+	unlock, err := lock.FlockAcquire(path + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	r, err := readPollerRecord(path)
+	if err != nil {
+		// Legacy dead PID/corrupt files can be removed, but live bare PIDs cannot
+		// establish identity and must never be sent a signal.
+		if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pollerProcessAlive(pid) {
+			return fmt.Errorf("refusing to signal unverified legacy poller PID %d", pid)
 		}
-		return fmt.Errorf("reading poller PID file: %w", err)
-	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		_ = os.Remove(pidPath)
-		return nil // corrupt PID file, clean up
-	}
-
-	if !pollerProcessAlive(pid) {
-		// Process already dead.
-		_ = os.Remove(pidPath)
+		_ = os.Remove(path)
 		return nil
 	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		_ = os.Remove(pidPath)
+	if !pollerProcessAlive(r.PID) {
+		removePollerRecord(path, r)
+		removePollerRecord(path+".ready", r)
 		return nil
 	}
-
-	// Send SIGTERM for graceful shutdown.
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		_ = os.Remove(pidPath)
-		return fmt.Errorf("sending SIGTERM to poller (pid %d): %w", pid, err)
+	// Obtain the process handle before checking identity. On Linux Go uses a
+	// pidfd, so a later PID reuse cannot redirect the signal to a new process.
+	proc, err := os.FindProcess(r.PID)
+	if err != nil {
+		return err
 	}
-
-	_ = os.Remove(pidPath)
+	defer proc.Release()
+	if r.Session != session || !pollerProcessMatches(r.PID, session, r.Token) {
+		return fmt.Errorf("refusing to signal PID %d: nudge-poller identity mismatch", r.PID)
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	removePollerRecord(path, r)
+	removePollerRecord(path+".ready", r)
 	return nil
 }
 
-// pollerAlive checks if a poller is running for the given session.
-// Returns the PID and whether the process is alive.
 func pollerAlive(townRoot, session string) (int, bool) {
-	pidPath := pollerPidFile(townRoot, session)
-
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
+	path := pollerPidFile(townRoot, session)
+	r, err := readPollerRecord(path)
+	if err != nil || r.Session != session {
 		return 0, false
 	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
+	ready, err := readPollerRecord(path + ".ready")
+	if err != nil || ready != r || !pollerProcessMatches(r.PID, session, r.Token) {
 		return 0, false
 	}
-
-	if !pollerProcessAlive(pid) {
-		// Stale PID file — clean up.
-		_ = os.Remove(pidPath)
-		return 0, false
-	}
-
-	return pid, true
+	return r.PID, true
 }
 
 // Watcher provides a filesystem-event-driven interface to the nudge queue.

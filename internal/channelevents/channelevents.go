@@ -38,22 +38,52 @@ func Emit(channel, eventType string, payloadPairs []string) (string, error) {
 		home, _ := os.UserHomeDir()
 		townRoot = filepath.Join(home, "gt")
 	}
-	eventDir := filepath.Join(townRoot, "events", channel)
-	if err := os.MkdirAll(eventDir, 0755); err != nil {
-		return "", fmt.Errorf("creating event directory: %w", err)
-	}
-
-	return emitToDir(eventDir, channel, eventType, payloadPairs)
+	return EmitToTown(townRoot, channel, eventType, payloadPairs)
 }
 
-// EmitToTown creates an event file using an explicit town root.
-// Used by internal callers that already know the town root.
-func EmitToTown(townRoot, channel, eventType string, payloadPairs []string) (string, error) {
+// RigScoped reports whether a channel has one consumer per rig.
+func RigScoped(channel string) bool {
+	return channel == "refinery" || channel == "witness"
+}
+
+// Directory is shared by producers and consumers. Rig-scoped channels never
+// fall back to the legacy town-wide directory, including during cleanup.
+func Directory(townRoot, channel, rig string) (string, error) {
 	if !ValidChannelName.MatchString(channel) {
 		return "", fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", channel)
 	}
+	dir := filepath.Join(townRoot, "events", channel)
+	if RigScoped(channel) {
+		if !ValidChannelName.MatchString(rig) {
+			return "", fmt.Errorf("channel %q requires a valid rig name (use --rig)", channel)
+		}
+		return filepath.Join(dir, rig), nil
+	}
+	return dir, nil
+}
 
-	eventDir := filepath.Join(townRoot, "events", channel)
+// EmitToTown creates an event with an explicit town root. Rig-scoped channels
+// require a rig payload; callers that know the recipient should use EmitToRig.
+func EmitToTown(townRoot, channel, eventType string, payloadPairs []string) (string, error) {
+	rig := ""
+	for _, pair := range payloadPairs {
+		if key, value, ok := strings.Cut(pair, "="); ok && key == "rig" {
+			rig = value
+		}
+	}
+	return EmitToRig(townRoot, rig, channel, eventType, payloadPairs)
+}
+
+// EmitToRig emits to the recipient rig, recording its identity in the payload.
+// Town-wide channels (such as mayor) retain their single shared directory.
+func EmitToRig(townRoot, rig, channel, eventType string, payloadPairs []string) (string, error) {
+	eventDir, err := Directory(townRoot, channel, rig)
+	if err != nil {
+		return "", err
+	}
+	if RigScoped(channel) {
+		payloadPairs = append(append([]string(nil), payloadPairs...), "rig="+rig)
+	}
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		return "", fmt.Errorf("creating event directory: %w", err)
 	}

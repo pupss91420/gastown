@@ -62,10 +62,7 @@ func TestPollerAlive_StalePid(t *testing.T) {
 		t.Error("pollerAlive() returned true for dead PID")
 	}
 
-	// Stale PID file should be cleaned up.
-	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
-		t.Error("stale PID file was not cleaned up")
-	}
+	// Inspection does not mutate unverified ownership records.
 }
 
 func TestPollerAlive_CorruptPidFile(t *testing.T) {
@@ -119,27 +116,103 @@ func TestStopPoller_StalePid(t *testing.T) {
 	}
 }
 
-func TestPollerAlive_LiveProcess(t *testing.T) {
-	townRoot := t.TempDir()
-	session := "gt-gastown-crew-test"
-
-	// Write our own PID — we're definitely alive.
-	pidDir := pollerPidDir(townRoot)
-	if err := os.MkdirAll(pidDir, 0755); err != nil {
+func TestPollerAliveRejectsUnrelatedLivePID(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(pollerPidDir(root), 0755); err != nil {
 		t.Fatal(err)
 	}
-	pidPath := pollerPidFile(townRoot, session)
-	myPid := os.Getpid()
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(myPid)), 0644); err != nil {
+	path := pollerPidFile(root, "hq-mayor")
+	// Legacy PID reuse must neither establish readiness nor authorize SIGTERM.
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	pid, alive := pollerAlive(townRoot, session)
-	if !alive {
-		t.Error("pollerAlive() returned false for live process")
+	if _, alive := pollerAlive(root, "hq-mayor"); alive {
+		t.Fatal("unrelated live PID accepted")
 	}
-	if pid != myPid {
-		t.Errorf("pollerAlive() pid = %d, want %d", pid, myPid)
+	if err := StopPoller(root, "hq-mayor"); err == nil {
+		t.Fatal("unverified live PID stop accepted")
+	}
+	// Even forged matching PID/ready records cannot impersonate the process.
+	record := pollerRecord{PID: os.Getpid(), Session: "hq-mayor", Token: "0123456789abcdef0123456789abcdef"}
+	if err := writePollerRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePollerRecord(path+".ready", record); err != nil {
+		t.Fatal(err)
+	}
+	if _, alive := pollerAlive(root, "hq-mayor"); alive {
+		t.Fatal("forged readiness accepted")
+	}
+	if err := StopPoller(root, "hq-mayor"); err == nil {
+		t.Fatal("mismatched process stop accepted")
+	}
+	if !pollerProcessAlive(os.Getpid()) {
+		t.Fatal("unrelated process was signaled")
+	}
+}
+
+func TestPollerRealReadinessAndOwnedStop(t *testing.T) {
+	binary := os.Getenv("GT_TEST_POLLER_BINARY")
+	if binary == "" {
+		t.Skip("run scripts/test-notification-delivery.py for real CLI readiness test")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX terminal stub")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	original := pollerExecutable
+	pollerExecutable = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { pollerExecutable = original })
+	pid, err := StartPoller(root, "hq-mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = StopPoller(root, "hq-mayor") })
+	if got, alive := pollerAlive(root, "hq-mayor"); !alive || got != pid {
+		t.Fatal("real child did not acknowledge readiness")
+	}
+	if got, err := StartPoller(root, "hq-mayor"); err != nil || got != pid {
+		t.Fatalf("ready child not reused: %d %v", got, err)
+	}
+	path := pollerPidFile(root, "hq-mayor")
+	record, err := readPollerRecord(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := record
+	wrong.Session = "other-session"
+	if err := writePollerRecord(path, wrong); err != nil {
+		t.Fatal(err)
+	}
+	if err := StopPoller(root, "hq-mayor"); err == nil {
+		t.Fatal("session mismatch stop accepted")
+	}
+	if !pollerProcessMatches(pid, record.Session, record.Token) {
+		t.Fatal("mismatched stop killed owned child")
+	}
+	if err := writePollerRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := StopPoller(root, "hq-mayor"); err != nil {
+		t.Fatal(err)
+	}
+	if _, alive := pollerAlive(root, "hq-mayor"); alive {
+		t.Fatal("stopped child still ready")
+	}
+	// A launched child whose tmux target validation fails must not report success.
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StartPoller(root, "missing-target"); err == nil {
+		t.Fatal("failed child startup reported ready")
 	}
 }
 

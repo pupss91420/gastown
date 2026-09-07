@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -120,6 +121,7 @@ func (m *Manager) Start(agentOverride string) error {
 		case ModeACP, ModeBoth:
 			return ErrACPActive
 		case ModeTMUX:
+			session.StartAgentNudgePoller(m.townRoot, m.SessionName())
 			return ErrAlreadyRunning
 		}
 	}
@@ -140,6 +142,10 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 	// Returns error if session is healthy and already running.
 	_, err := session.KillExistingSession(t, sessionID, true)
 	if err != nil {
+		// Repair the drain for a healthy existing session after a harness swap.
+		if t.IsAgentAlive(sessionID) {
+			session.StartAgentNudgePoller(m.townRoot, sessionID)
+		}
 		return ErrAlreadyRunning
 	}
 
@@ -329,6 +335,7 @@ func (m *Manager) StartACP(ctx context.Context, agentOverride, rigName string) e
 func (m *Manager) Stop() error {
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
+	_ = nudge.StopPoller(m.townRoot, sessionID)
 
 	// Check if session exists
 	running, err := t.HasSession(sessionID)
