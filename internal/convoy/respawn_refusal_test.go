@@ -34,7 +34,14 @@ func setupRefusalCommands(t *testing.T, town, id string) (binary, logPath, state
 	script := `#!/bin/sh
 case "$1" in
  show) cat "$REFUSAL_BIN/$(cat "$REFUSAL_BIN/state").json" ;;
- query) cat "$REFUSAL_BIN/mail.json" ;;
+ query)
+  test "$2" = 'label="thread:hq-refusal"' || exit 9
+  test "$3" = --all || exit 9
+  test "$4" = --limit || exit 9
+  test "$5" = 0 || exit 9
+  test "$6" = --json || exit 9
+  test "$#" = 6 || exit 9
+  cat "$REFUSAL_BIN/mail.json" ;;
  update)
   test "$3" = "--status=blocked" || exit 9
   test "$#" = 4 || exit 9
