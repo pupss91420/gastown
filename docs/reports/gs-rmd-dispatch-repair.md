@@ -104,15 +104,26 @@ contrast at `capable` then captured loading composer → actual Codex trust menu
 worker, exact hook, `GS_RMD_LOADING_TRUST_OK` report read-back, live pane and
 sling exit 0. The coordinator accepted startup on both observed trust-menu paths
 at 2026-09-07 16:14 UTC. Recovery JSON and clean git state were captured before
-supported probe cleanup. A release build including the later terminal intervention
-handler still requires integration with coordinator approval.
+supported probe cleanup.
 
-Real startup acceptance was completed by the coordinator; terminal intervention
-review and installed-runtime integration remain separate. Disposable probe beads `gs-vpr`
-(default configured Claude route) and `gs-nml` (explicit Codex) require the worker
-to read its exact hook, write/read a harmless report, persist `GS_RMD_PROBE_OK`,
-and remain available for coordinator capture. Coordinator execution was requested
-because `runSling` rejects the polecat role. No installed binary has been replaced.
-Installing/restarting the daemon to activate its in-process feeder change must be
-coordinated after acceptance, preserving other agents. Passing unit tests or merging
-this patch alone is not evidence that installed dispatch has been repaired.
+The coordinator accepted terminal intervention and completed rollout at
+2026-09-07 16:34 UTC. Production source commit `3d78408f` was preserved outside
+the worker worktree, with binary SHA256
+`24e5a48c93f8d795fa5bbdc0769c3c73929ab7d5deae258de70719e98fa61e06`.
+Seven independently executed targeted tests and live read-only receipt-helper
+positive/negative controls passed against installed bd 1.2.2. Commit `27661dfb`
+adds an exact query-argument test assertion without changing production code.
+
+The coordinator backed up and atomically replaced the installed binary, then
+restarted only the daemon (PID 8674 → 10044). The running daemon executable hash
+matches the preserved release. All ten existing agent pane PIDs and Dolt PID
+8772 were unchanged. Evidence is preserved under `review-3d78408f/` and
+`rollout-3d78408f/` in the coordinator report directory above. The coordinator
+closed blocker `gs-l65` on this deployed and tested repair. Real AlphaPrime audit
+beads remain blocked, their convoys deferred, and respawn counters untouched.
+Code integration proceeds through the refinery merge queue; installed rollout
+is not a claim that the branch has already merged to main.
+
+Git branch pushes succeeded. The separate Dolt remote-history mismatch prevented
+`bd dolt push`; recovery remains tracked as `hq-wayo`. No force push, bootstrap,
+or shared database repair was attempted.
