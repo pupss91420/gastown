@@ -19,6 +19,7 @@ type WorkstateInput struct {
 	IgnoreCleanupStatus            bool
 	PartialSpawnWithoutDurableHook bool
 	PushFailed                     bool
+	IgnorePushFailed               bool
 	MRFailed                       bool
 	Branch                         string
 	GitDirty                       bool
@@ -57,7 +58,7 @@ type WorkstateDisposition struct {
 
 // DecideWorkstate returns the canonical disposition for a polecat.
 func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
-	if in.ActiveMRBlocker != "" && !in.PushFailed && !in.MRFailed && in.State == StateDone {
+	if in.ActiveMRBlocker != "" && (!in.PushFailed || in.IgnorePushFailed) && !in.MRFailed && in.State == StateDone {
 		return WorkstateDisposition{
 			Verdict:     WorkstateVerdictPendingMR,
 			Reason:      "active-mr-open",
@@ -104,7 +105,7 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	if in.HookBead != "" && !in.PartialSpawnWithoutDurableHook {
 		block("hook-still-set", "has work on hook ("+in.HookBead+")", true)
 	}
-	if in.PushFailed {
+	if in.PushFailed && !in.IgnorePushFailed {
 		block("push-failed", "push_failed=true", true)
 	}
 	if in.MRFailed {
@@ -240,4 +241,20 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// CanIgnoreStalePushFailed reports whether a sticky push_failed flag on the agent
+// bead is contradicted by live evidence and may be disregarded.
+//
+// push_failed is written when a push attempt fails and is never cleared on a later
+// success, so a polecat whose work did land stays blocked forever. It is only safe
+// to disregard when the work reference is terminal, the hook is absent or terminal, no active MR
+// is pending, and a LIVE check of the worktree proves the branch is preserved on the
+// remote. If any of those
+// is unproven this returns false, so the flag keeps blocking (fail closed).
+func CanIgnoreStalePushFailed(pushFailed, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
+	if !pushFailed {
+		return false
+	}
+	return workTerminal && hookSafe && activeMRSafe && gitSafe
 }

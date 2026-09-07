@@ -503,6 +503,13 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 		style.PrintWarning("runtime may not be fully ready: %v", err)
 	}
 
+	// The final readiness wait may outlive SessionManager's startup check.
+	// Require a live agent before recording working state, including when tmux
+	// cannot answer. An unknown observation is an error, not proof of death.
+	if err := verifySessionLive(t, s.SessionName, spawnLivenessTimeout, spawnLivenessInterval); err != nil {
+		return "", fmt.Errorf("verifying session for %s/%s: %w", s.RigName, s.PolecatName, err)
+	}
+
 	// Update agent state with retry logic (gt-94llt7: fail-safe Dolt writes).
 	// Note: warn-only, not fail-hard. The tmux session is already started above,
 	// so returning an error here would leave an orphaned session with no cleanup path.

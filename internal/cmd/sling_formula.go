@@ -505,7 +505,11 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	if err := hookBeadWithRetryFn(wispRootID, targetAgent, hookDir); err != nil {
 		return err
 	}
-	fmt.Printf("%s Attached to hook (status=hooked)\n", style.Bold.Render("✓"))
+	if resolved.NewPolecatInfo != nil {
+		fmt.Printf("%s Attached to hook (status=hooked; session pending)\n", style.Bold.Render("✓"))
+	} else {
+		fmt.Printf("%s Attached to hook (status=hooked)\n", style.Bold.Render("✓"))
+	}
 
 	// Log sling event to activity feed (formula slinging)
 	actor := detectActor()
@@ -556,6 +560,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		pane, err := resolved.NewPolecatInfo.StartSession()
 		if err != nil {
 			// Rollback: unhook wisp, delete Dolt branch, clean up polecat worktree/agent bead
+			reportDispatchFailure(targetAgent, wispRootID, err)
 			rollbackSlingArtifactsFn(resolved.NewPolecatInfo, wispRootID, "", "")
 			return fmt.Errorf("starting polecat session: %w", err)
 		}

@@ -144,3 +144,78 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 		})
 	}
 }
+
+func TestCanIgnoreStalePushFailed(t *testing.T) {
+	tests := []struct {
+		name                                              string
+		pushFailed, workTerminal, hookSafe, mrSafe, gitOK bool
+		want                                              bool
+	}{
+		{name: "all evidence present", pushFailed: true, workTerminal: true, hookSafe: true, mrSafe: true, gitOK: true, want: true},
+		{name: "flag not set", pushFailed: false, workTerminal: true, hookSafe: true, mrSafe: true, gitOK: true, want: false},
+		{name: "work not terminal", pushFailed: true, workTerminal: false, hookSafe: true, mrSafe: true, gitOK: true, want: false},
+		{name: "hook not safe", pushFailed: true, workTerminal: true, hookSafe: false, mrSafe: true, gitOK: true, want: false},
+		{name: "active mr pending", pushFailed: true, workTerminal: true, hookSafe: true, mrSafe: false, gitOK: true, want: false},
+		{name: "git not safe", pushFailed: true, workTerminal: true, hookSafe: true, mrSafe: true, gitOK: false, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CanIgnoreStalePushFailed(tt.pushFailed, tt.workTerminal, tt.hookSafe, tt.mrSafe, tt.gitOK)
+			if got != tt.want {
+				t.Errorf("CanIgnoreStalePushFailed() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecideWorkstateIgnorePushFailed(t *testing.T) {
+	base := func() WorkstateInput {
+		return WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, PushFailed: true}
+	}
+
+	in := base()
+	d := DecideWorkstate(in)
+	if !d.NeedsRecovery || d.Reason != "push-failed" {
+		t.Fatalf("sticky push_failed must block by default, got verdict=%v reason=%q", d.Verdict, d.Reason)
+	}
+
+	in = base()
+	in.IgnorePushFailed = true
+	d = DecideWorkstate(in)
+	if d.NeedsRecovery {
+		t.Errorf("IgnorePushFailed must clear the push-failed blocker, got verdict=%v blockers=%v", d.Verdict, d.Blockers)
+	}
+	for _, b := range d.Blockers {
+		if b == "push_failed=true" {
+			t.Errorf("push_failed blocker still present with IgnorePushFailed set: %v", d.Blockers)
+		}
+	}
+}
+
+func TestReconciledPushFailureRetainsOtherBlockers(t *testing.T) {
+	for _, name := range []string{"dirty", "stash", "git unknown", "mr failed", "pending mr", "hook", "mq unknown"} {
+		t.Run(name, func(t *testing.T) {
+			in := WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, PushFailed: true, IgnorePushFailed: true}
+			switch name {
+			case "dirty":
+				in.GitDirty = true
+			case "stash":
+				in.StashCount = 1
+			case "git unknown":
+				in.GitCheckFailed = true
+			case "mr failed":
+				in.MRFailed = true
+			case "pending mr":
+				in.ActiveMRBlocker = "active MR pending"
+			case "hook":
+				in.HookBead = "work"
+			case "mq unknown":
+				in.MQCheckRequired = true
+				in.MQLookupFailed = true
+			}
+			if got := DecideWorkstate(in); got.SafeToNuke || got.Reusable {
+				t.Fatalf("other blocker lost: %+v", got)
+			}
+		})
+	}
+}

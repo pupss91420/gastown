@@ -1107,7 +1107,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		status.ActiveMR = fields.ActiveMR
 		input.ActiveMR = fields.ActiveMR
 		hookBead := agentHookBead(agentIssue, fields)
-		_, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
+		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		targetRefs, targetRefLookupFailed = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
@@ -1128,9 +1128,18 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		if diagnostic != "" {
 			status.Diagnostics = append(status.Diagnostics, diagnostic)
 		}
+		// Share a current remote-preservation probe across reconciliation checks.
+		gitSafeComputed, gitSafeValue := false, false
+		gitSafeLive := func() bool {
+			if !gitSafeComputed {
+				gitSafeValue = activeMRGitSafeForWorktree(p.ClonePath)
+				gitSafeComputed = true
+			}
+			return gitSafeValue
+		}
 		activeMRAssessment := polecat.ActiveMRAssessment{}
 		if fields.ActiveMR != "" {
-			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
+			gitSafe := gitSafeLive()
 			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{
 				ActiveMR:        fields.ActiveMR,
 				SourceIssueHint: sourceHint,
@@ -1155,12 +1164,16 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			if input.CleanupStatus == polecat.CleanupUnpushed {
 				loadGitState()
 			}
-			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
+			gitSafe := gitSafeLive()
 			if polecat.CleanupStatusRefutedByGit(input.CleanupStatus, gitSafe) {
 				input.IgnoreCleanupStatus = true
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("refuted_stale_cleanup_status=%s direct_git_state=safe", input.CleanupStatus))
 				input.CleanupStatus = polecat.CleanupClean
 			}
+		}
+		if input.PushFailed && polecat.CanIgnoreStalePushFailed(input.PushFailed, workTerminal, hookSafe, !activeMRAssessment.Pending && !targetRefLookupFailed, gitSafeLive()) {
+			input.IgnorePushFailed = true
+			status.Diagnostics = append(status.Diagnostics, "ignored_stale_push_failed=true direct_git_state=safe work_ref=terminal")
 		}
 		loadGitState()
 		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
@@ -1349,14 +1362,16 @@ func activeMRGitSafeForWorktree(worktreePath string) bool {
 		return false
 	}
 	status, err := g.CheckUncommittedWork()
-	if err != nil || !status.CleanExcludingRuntime() || status.StashCount > 0 || status.UnpushedCommits > 0 {
-		return false
-	}
-	pushed, unpushed, err := g.BranchPushedToRemote(branch, "origin")
 	if err != nil {
 		return false
 	}
-	return pushed && unpushed == 0
+	// Ignore tracking-ref counts only here; current remote custody below must
+	// independently prove preservation before this probe can return safe.
+	if !status.CleanExcludingRuntime() || status.StashCount > 0 {
+		return false
+	}
+	preserved, err := g.BranchPreservedOnCurrentRemote(branch, "origin")
+	return err == nil && preserved
 }
 
 func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, terminal bool, blocker string) {

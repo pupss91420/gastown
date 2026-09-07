@@ -3215,6 +3215,33 @@ func (g *Git) BranchPushedToRemote(localBranch, remote string) (bool, int, error
 	return status.Preserved, status.UnpreservedPatchCount, nil
 }
 
+// BranchPreservedOnCurrentRemote proves preservation using only hashes advertised
+// by the push remote now. Tracking refs cannot prove custody: they may describe
+// a deleted branch or a remote that is currently unreachable. Unknown objects
+// fail closed; callers may fetch and retry separately.
+func (g *Git) BranchPreservedOnCurrentRemote(branch, remote string) (bool, error) {
+	refs, err := g.ListPushRemoteRefsWithHashes(remote, "refs/heads/")
+	if err != nil {
+		return false, err
+	}
+	targets := map[string]bool{
+		"refs/heads/" + branch:                  true,
+		"refs/heads/" + g.RemoteDefaultBranch(): true,
+		"refs/heads/main":                       true,
+		"refs/heads/master":                     true,
+	}
+	for _, ref := range refs {
+		if !targets[ref.Name] || ref.Hash == "" {
+			continue
+		}
+		status, err := g.preservationAgainstRef(ref.Hash)
+		if err == nil && status.Preserved {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // PrunedBranch represents a local branch that was pruned (or would be pruned in dry-run).
 type PrunedBranch struct {
 	Name   string // Branch name (e.g., "polecat/rictus-mkb0vq9f")

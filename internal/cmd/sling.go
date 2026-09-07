@@ -1073,7 +1073,11 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Name the actual assignee: success output that omitted it is what made the
 	// silent misroute in hq-s1t invisible.
-	fmt.Printf("%s Work attached to hook: %s (status=hooked)\n", style.Bold.Render("✓"), targetAgent)
+	if newPolecatInfo != nil {
+		fmt.Printf("%s Work attached to hook: %s (status=hooked; session pending)\n", style.Bold.Render("✓"), targetAgent)
+	} else {
+		fmt.Printf("%s Work attached to hook: %s (status=hooked)\n", style.Bold.Render("✓"), targetAgent)
+	}
 
 	// Log sling event to activity feed
 	_ = events.LogFeed(events.TypeSling, actor, events.SlingPayload(beadID, targetAgent))
@@ -1125,6 +1129,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		if err != nil {
 			// Rollback: session failed, clean up zombie artifacts (worktree, hooked bead).
 			// Without rollback, next sling attempt fails with "bead already hooked" (gt-jn40ft).
+			reportDispatchFailure(targetAgent, beadID, err)
 			rollbackSpawnedPolecat("Session failed")
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
@@ -1431,23 +1436,14 @@ func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, 
 				}
 			}
 
-			// Re-read immediately before unhook: an owner may have blocked the
-			// bead while startup was running. Rollback must retain that pause.
-			current, readErr := getBeadInfoForRollback(beadID)
-			status, canUnhook := rollbackUnhookStatus(current, spawnInfo.AgentID())
-			if readErr != nil || !canUnhook {
-				fmt.Printf("  %s Rollback did not change bead %s: state changed or unreadable (%v)\n", style.Dim.Render("Warning:"), beadID, readErr)
+			unhookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
+			if unhookErr := verifyRollbackUnhook(beadID, spawnInfo.AgentID(), getBeadInfoForRollback,
+				func(id, status string) error {
+					return BdCmd("update", id, "--status="+status, "--assignee=").Dir(unhookDir).WithAutoCommit().Run()
+				}); unhookErr != nil {
+				fmt.Printf("  %s Rollback could not confirm release of bead %s: %v. Inspect its current status and assignee before retrying.\n", style.Error.Render("STRANDED WORK:"), beadID, unhookErr)
 			} else {
-				unhookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
-				if err := BdCmd("update", beadID, "--status="+status, "--assignee=").Dir(unhookDir).WithAutoCommit().Run(); err != nil {
-					fmt.Printf("  %s Could not unhook bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-				} else if observed, verifyErr := getBeadInfoForRollback(beadID); verifyErr != nil || observed == nil {
-					fmt.Printf("  %s Could not verify unhook of %s: %v\n", style.Dim.Render("Warning:"), beadID, verifyErr)
-				} else if observed.Status != status || observed.Assignee != "" {
-					fmt.Printf("  %s Rollback incomplete for %s: status=%s assignee=%s\n", style.Dim.Render("Warning:"), beadID, observed.Status, observed.Assignee)
-				} else {
-					fmt.Printf("  %s Verified unhook of bead %s\n", style.Dim.Render("○"), beadID)
-				}
+				fmt.Printf("  %s Verified release of bead %s\n", style.Dim.Render("○"), beadID)
 			}
 		}
 	}
