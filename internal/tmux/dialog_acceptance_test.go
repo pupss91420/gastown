@@ -406,7 +406,13 @@ func TestAcceptWorkspaceTrustDialogChangedDefaultLive(t *testing.T) {
  print("\033[2J\033[HQuick safety check\r\n\r\n❯ No, exit\r\n  Yes, I trust this folder\r\nEnter to confirm", flush=True)
  keys = b""
  while not keys.endswith(b"\r"):
-  keys += os.read(sys.stdin.fileno(), 1)
+  time.sleep(0.2)
+  event = os.read(sys.stdin.fileno(), 4096)
+  if b"\r" in event and len(event) > 1:
+   sys.exit(2)
+  keys += event
+  if keys in (b"\x1b[B", b"\x1bOB"):
+   print("\033[2J\033[HQuick safety check\r\n  No, exit\r\n❯ Yes, I trust this folder\r\nEnter to confirm", flush=True)
  open(sys.argv[1], "w").write(keys.hex())
  if keys not in (b"\x1b[B\r", b"\x1bOB\r"):
   sys.exit(1)

@@ -2040,6 +2040,7 @@ func (t *Tmux) CheckStartupBlocked(session string) (retErr error) {
 // agent prompt appears (indicating no dialog will be shown).
 func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 	deadline := time.Now().Add(constants.DialogPollTimeout)
+	navigationSent := false
 	for time.Now().Before(deadline) {
 		content, err := t.run("capture-pane", "-p", "-t", session)
 		if err != nil {
@@ -2054,10 +2055,22 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := t.run(append([]string{"send-keys", "-t", session}, keys...)...); err != nil {
+			// Send navigation separately, then observe the resulting selection.
+			// TUI input parsers can coalesce Down+Enter into one unrecognized
+			// event, or process Enter before the selection state has rendered.
+			// Enter is safe only after a capture confirms the affirmative row.
+			if keys[0] != "Enter" && navigationSent {
+				time.Sleep(constants.DialogPollInterval)
+				continue
+			}
+			if _, err := t.run("send-keys", "-t", session, keys[0]); err != nil {
 				return err
 			}
-			// Wait for dialog to dismiss before proceeding
+			if keys[0] != "Enter" {
+				navigationSent = true
+				time.Sleep(constants.DialogPollInterval)
+				continue
+			}
 			time.Sleep(500 * time.Millisecond)
 			return nil
 		}
@@ -2072,8 +2085,8 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 		time.Sleep(constants.DialogPollInterval)
 	}
 
-	// Timeout — no dialog detected, safe to proceed
-	return nil
+	// Selection never converged to a ready prompt or accepted menu.
+	return fmt.Errorf("workspace trust selection did not become ready in %s", session)
 }
 
 // workspaceTrustKeys selects the affirmative option using the visible selection,

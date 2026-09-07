@@ -13,7 +13,12 @@ The existing reproduction used `gt sling ap-zek.1/.2 AlphaPrime --review-only
 sent bare Enter under an explicit assumption that option one accepts trust.
 That assumption is false for the captured menu. The new live tmux regression
 uses a raw terminal program which exits on bare Enter and survives only when the
-correct selection is delivered; it verifies Down+Enter bytes.
+correct selection is delivered; it verifies separate navigation and confirmation.
+The first real revised Claude probe (`gs-vpr`, `gs-dementus`) still timed out
+with its menu unchanged. The next revision sends navigation alone and requires
+a fresh capture showing the affirmative selection before sending Enter; the
+fixture rejects combined navigation/Enter input. Coalesced TUI input is the
+working explanation for the real failure, pending another runtime probe.
 
 A separate masking defect used `CapturePane(..., 80)`, which includes scrollback
 via `-S -80`. Prompt detection recognized trailing prompt glyphs but missed a
