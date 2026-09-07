@@ -1705,6 +1705,12 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 		return false
 	}
 
+	// Operator pauses are statuses, independently of dependency metadata.
+	// A paused bead with no assignee must not fall through as orphaned work.
+	if status == "blocked" || status == "deferred" {
+		return false
+	}
+
 	// Closed issues are never ready
 	if status == "closed" || status == "tombstone" {
 		return false

@@ -543,6 +543,9 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 
 	for _, issueID := range c.ReadyIssues {
 		if witness.ShouldBlockRespawn(m.townRoot, issueID) {
+			if err := convoy.HandleRespawnRefusal(m.ctx, m.townRoot, issueID, m.gtPath); err != nil {
+				m.logger("Convoy %s: terminal intervention for %s failed: %v", c.ID, issueID, err)
+			}
 			m.logger("Convoy %s: %s requires intervention: respawn circuit open", c.ID, issueID)
 			continue
 		}

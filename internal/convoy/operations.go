@@ -339,11 +339,6 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			continue
 		}
 
-		if witness.ShouldBlockRespawn(townRoot, issue.ID) {
-			logger("%s: convoy %s: %s requires intervention: respawn circuit open", caller, convoyID, issue.ID)
-			continue
-		}
-
 		logger("%s: convoy %s: feeding next ready issue %s to %s", caller, convoyID, issue.ID, rig)
 		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch); err != nil {
 			logger("%s: convoy %s: dispatch %s failed: %s", caller, convoyID, issue.ID, util.FirstLine(err.Error()))
@@ -616,6 +611,13 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 // The context parameter enables cancellation on daemon shutdown.
 // gtPath is the resolved path to the gt binary.
 func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch string) error {
+	if witness.ShouldBlockRespawn(townRoot, issueID) {
+		if err := HandleRespawnRefusal(ctx, townRoot, issueID, gtPath); err != nil {
+			return fmt.Errorf("%s requires intervention: respawn circuit open: %w", issueID, err)
+		}
+		return fmt.Errorf("%s requires intervention: respawn circuit open", issueID)
+	}
+
 	args := []string{"sling", issueID, rig, "--no-boot"}
 	if baseBranch != "" {
 		args = append(args, "--base-branch="+baseBranch)

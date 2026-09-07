@@ -45,8 +45,16 @@ it is not a scheduling exclusion.
 
 Direct and queued sling reject blocked beads unless explicitly forced. Both the
 reactive convoy feeder and daemon stranded-convoy feeder check the respawn circuit
-before starting a sling subprocess. Existing per-bead sling locks still serialize
-dispatch. Rollback re-reads operator state, retains blocked/deferred status, refuses
+before starting a sling subprocess. A shared handler takes the same per-bead
+sling lock, reads the current open/unassigned state, creates a fingerprinted
+high-severity escalation, then blocks the bead and verifies that status persisted.
+Escalation precedes the status update, so a crash cannot leave silently blocked
+work; the escalation fingerprint deduplicates retries after partial failure.
+Completed work, existing pauses and live assignments are left alone. Only the
+status field is updated, retaining all retry constraints and respawn counters.
+The stranded-convoy readiness predicate also explicitly excludes blocked/deferred
+statuses instead of considering unassigned paused work orphaned. Existing
+per-bead sling locks still serialize dispatch. Rollback re-reads operator state, retains blocked/deferred status, refuses
 to unhook another assignee or reopen closed work, verifies the resulting bead state,
 and checks session/worktree removal.
 
@@ -63,7 +71,31 @@ overrode ports in test fixtures; all three pass with that environment variable
 removed from the test process. The corrected full suite passes with `env -u GT_DOLT_PORT go test ./...`.
 The later diagnostic-preservation addition also passes targeted tests and vet.
 
-Real runtime acceptance remains required. Disposable probe beads `gs-vpr`
+The observed-selection candidate passed fresh Claude `gs-hr9` and reused Claude
+`gs-m3t` (same directory inode 229205), with exit 0, live panes and exact-hook
+report markers. Its Codex probe `gs-fbi` failed: a `model: loading` composer
+preceded the trust menu. Treating that placeholder as ready allowed subsequent
+startup delivery to race the modal. The loading-guard revision waits for a
+non-loading composer stable for 500ms, and runtime readiness also rejects loading
+headers and modal selections. The raw-TUI regression reproduces a loading
+composer before the delayed trust menu.
+
+Coordinator evidence lives under
+`mayor/reports/dispatch-probes-20260907/` in the town workspace. The immutable
+loading-guard artifact SHA256 is
+`35e25d3a2503733e680a4f7d738651e2abfa738544f203b3aac26f3a42be2ed5`.
+Its Codex `gs-fmm`, default Claude `gs-mwr`, and reused Claude `gs-546` all passed
+exit/pane/hook/report checks; reuse retained inode 313770. The first Codex pass
+showed no trust modal at an already trusted pathname. The decisive `gs-okn`
+contrast at `capable` then captured loading composer → actual Codex trust menu →
+worker, exact hook, `GS_RMD_LOADING_TRUST_OK` report read-back, live pane and
+sling exit 0. The coordinator accepted startup on both observed trust-menu paths
+at 2026-09-07 16:14 UTC. Recovery JSON and clean git state were captured before
+supported probe cleanup. A release build including the later terminal intervention
+handler still requires integration with coordinator approval.
+
+Real startup acceptance was completed by the coordinator; terminal intervention
+review and installed-runtime integration remain separate. Disposable probe beads `gs-vpr`
 (default configured Claude route) and `gs-nml` (explicit Codex) require the worker
 to read its exact hook, write/read a harmless report, persist `GS_RMD_PROBE_OK`,
 and remain available for coordinator capture. Coordinator execution was requested

@@ -1969,6 +1969,7 @@ func (t *Tmux) AcceptStartupDialogs(session string) (retErr error) {
 	}()
 	deadline := time.Now().Add(constants.ClaudeStartTimeout)
 	var handled string
+	var readySince time.Time
 	for time.Now().Before(deadline) {
 		content, err := t.run("capture-pane", "-p", "-t", session)
 		if err != nil {
@@ -1977,11 +1978,19 @@ func (t *Tmux) AcceptStartupDialogs(session string) (retErr error) {
 		lastScreen = content
 		blocker, blocked := containsBlockingStartupDialog(content)
 		if !blocked {
-			if containsPromptIndicator(content) || lastPromptIndicatorLine(content) >= 0 {
-				return nil
+			if !containsStartupLoading(content) && (containsPromptIndicator(content) || lastPromptIndicatorLine(content) >= 0) {
+				if readySince.IsZero() {
+					readySince = time.Now()
+				}
+				if time.Since(readySince) >= 500*time.Millisecond {
+					return nil
+				}
+			} else {
+				readySince = time.Time{}
 			}
 			handled = ""
 		} else if blocker != handled {
+			readySince = time.Time{}
 			switch blocker {
 			case "workspace trust prompt":
 				err = t.AcceptWorkspaceTrustDialog(session)
@@ -2087,6 +2096,23 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 
 	// Selection never converged to a ready prompt or accepted menu.
 	return fmt.Errorf("workspace trust selection did not become ready in %s", session)
+}
+
+// Codex renders a composer before loading project configuration and its trust
+// modal. That placeholder is not readiness. Use the latest header values so
+// stale loading headers above a completed header do not block a live worker.
+func containsStartupLoading(content string) bool {
+	modelLoading, directoryLoading := false, false
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "│|"))
+		if value, ok := strings.CutPrefix(line, "model:"); ok {
+			modelLoading = strings.HasPrefix(strings.TrimSpace(value), "loading")
+		}
+		if value, ok := strings.CutPrefix(line, "directory:"); ok {
+			directoryLoading = strings.HasPrefix(strings.TrimSpace(value), "loading")
+		}
+	}
+	return modelLoading || directoryLoading
 }
 
 // workspaceTrustKeys selects the affirmative option using the visible selection,
@@ -3480,6 +3506,11 @@ func (t *Tmux) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, tim
 		// Capture last few lines of the pane
 		lines, err := t.CapturePaneLines(session, 10)
 		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		content := strings.Join(lines, "\n")
+		if _, blocked := containsBlockingStartupDialog(content); blocked || containsStartupLoading(content) {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}

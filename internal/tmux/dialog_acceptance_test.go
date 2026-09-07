@@ -402,6 +402,7 @@ func TestAcceptWorkspaceTrustDialogChangedDefaultLive(t *testing.T) {
 	report := filepath.Join(dir, "keys")
 	source := `import os, sys, time, tty
  tty.setraw(sys.stdin.fileno())
+ print("│ model: loading /model to change │\r\n│ directory: loading │\r\n› Ask Codex to do anything", flush=True)
  time.sleep(9)
  print("\033[2J\033[HQuick safety check\r\n\r\n❯ No, exit\r\n  Yes, I trust this folder\r\nEnter to confirm", flush=True)
  keys = b""
@@ -449,5 +450,18 @@ func TestCheckStartupBlockedMissingPane(t *testing.T) {
 	err := tm.CheckStartupBlocked("gt-missing-startup")
 	if err == nil || !strings.Contains(err.Error(), "startup observation failed") || strings.Contains(err.Error(), "dialog still visible") {
 		t.Fatalf("wrong classification: %v", err)
+	}
+}
+
+func TestStartupLoadingComposerIsNotReady(t *testing.T) {
+	loading := "│ model: loading /model to change │\n│ directory: /work │\n› Ask Codex to do anything"
+	if !containsStartupLoading(loading) {
+		t.Fatal("loading composer mistaken for readiness")
+	}
+	if containsStartupLoading(loading + "\n│ model: gpt-ready /model to change │\n› Ask Codex to do anything") {
+		t.Fatal("historical loading header blocked readiness")
+	}
+	if containsStartupLoading("Quick safety check\n❯ No, exit\nYes, I trust this folder") {
+		t.Fatal("trust menu misclassified as loading")
 	}
 }

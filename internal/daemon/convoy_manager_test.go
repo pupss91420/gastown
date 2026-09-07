@@ -2450,7 +2450,33 @@ func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
 }
 
 func TestFeedFirstReadyLatchedRespawnDoesNotLaunch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command stubs")
+	}
 	town := t.TempDir()
+	bin := t.TempDir()
+	state := filepath.Join(bin, "state")
+	alertLog := filepath.Join(bin, "alerts")
+	if err := os.WriteFile(state, []byte("open"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	bdScript := `#!/bin/sh
+case "$1" in
+ show) printf '[{"id":"gt-refused","status":"%s","assignee":"","description":"review_only: true"}]' "$(cat "$REFUSAL_STATE")" ;;
+ update) test "$3" = "--status=blocked" || exit 9; test "$#" = 3 || exit 9; echo blocked > "$REFUSAL_STATE" ;;
+ *) exit 9 ;;
+esac
+`
+	gtScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REFUSAL_ALERT_LOG\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REFUSAL_STATE", state)
+	t.Setenv("REFUSAL_ALERT_LOG", alertLog)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := os.MkdirAll(filepath.Join(town, "witness"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -2458,9 +2484,17 @@ func TestFeedFirstReadyLatchedRespawnDoesNotLaunch(t *testing.T) {
 		witness.RecordBeadRespawn(town, "gt-refused")
 	}
 	var log []string
-	manager := NewConvoyManager(town, func(format string, args ...interface{}) { log = append(log, fmt.Sprintf(format, args...)) }, "must-not-launch-gt", time.Minute, nil, nil, nil)
+	manager := NewConvoyManager(town, func(format string, args ...interface{}) { log = append(log, fmt.Sprintf(format, args...)) }, filepath.Join(bin, "gt"), time.Minute, nil, nil, nil)
 	for i := 0; i < 3; i++ {
 		manager.feedFirstReady(strandedConvoyInfo{ID: "hq-probe", ReadyIssues: []string{"gt-refused"}})
+	}
+	alerts, err := os.ReadFile(alertLog)
+	if err != nil || strings.Count(string(alerts), "escalate ") != 1 || strings.Contains(string(alerts), "sling ") {
+		t.Fatalf("terminal intervention repeated or launched sling: %s %v", alerts, err)
+	}
+	status, err := os.ReadFile(state)
+	if err != nil || strings.TrimSpace(string(status)) != "blocked" {
+		t.Fatalf("terminal state missing: %q %v", status, err)
 	}
 	text := strings.Join(log, "\n")
 	if strings.Count(text, "respawn circuit open") != 3 || strings.Contains(text, "feeding") || strings.Contains(text, "sling gt-refused failed") {

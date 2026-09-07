@@ -11,6 +11,8 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 func TestExtractIssueID(t *testing.T) {
@@ -1791,5 +1793,29 @@ exit 0
 	logStr := string(logData)
 	if !strings.Contains(logStr, "nudge") || !strings.Contains(logStr, "gastown/witness") {
 		t.Errorf("expected gt nudge gastown/witness in log, got: %q\nlogger output: %v", logStr, logged)
+	}
+}
+
+func TestDispatchIssueLatchedCircuitNeverLaunches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command stub")
+	}
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "witness"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < config.DefaultWitnessMaxBeadRespawns; i++ {
+		witness.RecordBeadRespawn(town, "test-latched")
+	}
+	binary, logPath, _ := setupRefusalCommands(t, town, "test-latched")
+	for i := 0; i < 3; i++ {
+		err := dispatchIssue(context.Background(), town, "test-latched", "rig", binary, "")
+		if err == nil || !strings.Contains(err.Error(), "respawn circuit open") {
+			t.Fatalf("wrong refusal: %v", err)
+		}
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil || strings.Contains(string(data), "sling ") {
+		t.Fatalf("terminal refusal launched sling or failed to alert: %s %v", data, err)
 	}
 }
